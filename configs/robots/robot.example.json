@@ -1,0 +1,103 @@
+{
+  "$schema": "./robot-definition.schema.json",
+  "robot": {
+    "name": "ExampleRobot",
+    "repository_root": "/path/to/robot-repository",
+    "model": "/path/to/robot-repository/robot.xml",
+    "root_body": "base_link",
+  },
+  "home": {
+    "position_m": [
+      0.0,
+      0.0,
+      0.3855
+    ],
+    "quaternion_wxyz": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+  },
+  "end_effectors": {
+    "left_foot": {
+      "body": "left_ankle_roll_link",
+      "offset_m": [
+        0.0,
+        -0.042,
+        0.0
+      ],
+      "foot": true,
+      "support_polygon_cm": [
+        [4.4, 0.0, -9.2],
+        [4.4, 0.0, 8.2],
+        [0.0, 0.0, 9.45],
+        [-4.4, 0.0, 7.9],
+        [-4.4, 0.0, -8.7],
+        [-2.2, 0.0, -10.5],
+        [0.0, 0.0, -10.75],
+        [2.2, 0.0, -10.6]
+      ],
+    },
+    "right_foot": {
+      "body": "right_ankle_roll_link",
+      "offset_m": [
+        0.0,
+        -0.042,
+        0.0
+      ],
+      "foot": true,
+      "support_polygon_cm": [
+        [4.4, 0.0, -9.2],
+        [4.4, 0.0, 8.2],
+        [0.0, 0.0, 9.45],
+        [-4.4, 0.0, 7.9],
+        [-4.4, 0.0, -8.7],
+        [-2.2, 0.0, -10.5],
+        [0.0, 0.0, -10.75],
+        [2.2, 0.0, -10.6]
+      ],
+    },
+    "left_hand": {
+      "body": "left_elbow_link"
+    },
+    "right_hand": {
+      "body": "right_elbow_link"
+    },
+    "head": {
+      "body": "head_link",
+      "control_mode": "orientation"
+    },
+  },
+  "joint_groups": {
+    "left_leg": [
+      "left_hip_pitch_joint",
+      "left_hip_roll_joint",
+      "left_hip_yaw_joint",
+      "left_knee_joint",
+      "left_ankle_pitch_joint",
+      "left_ankle_roll_joint",
+    ],
+    "right_leg": [
+      "right_hip_pitch_joint",
+      "right_hip_roll_joint",
+      "right_hip_yaw_joint",
+      "right_knee_joint",
+      "right_ankle_pitch_joint",
+      "right_ankle_roll_joint",
+    ],
+    "arms": [
+      "left_shoulder_pitch_joint",
+      "left_shoulder_roll_joint",
+      "left_shoulder_yaw_joint",
+      "right_shoulder_pitch_joint",
+      "right_shoulder_roll_joint",
+      "right_shoulder_yaw_joint",
+    ],
+    "head": [
+      "neck_yaw_joint",
+      "neck_pitch_joint",
+      "neck_roll_joint"
+    ],
+  },
+}

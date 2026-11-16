@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "robot-motion-forge"
+version = "0.1.0"
+description = "Robot-independent keyframe authoring and constrained reference motion generation"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "json5>=0.12,<1",
+  "pydantic>=2.12,<3",
+  "numpy>=1.26,<3",
+  "scipy>=1.18,<1.19",
+  "mujoco>=3.17,<3.18",
+  "mink>=1.2,<2",
+  "daqp>=0.8.7,<0.9",
+  "pyceres>=2.6,<2.7",
+  "viser>=1.1.1,<2",
+  "trimesh>=4,<6",
+  "typing-extensions>=4.14.1,<5",
+]
+
+[dependency-groups]
+dev = [
+  "mujoco-stubs>=3.17,<3.18",
+  "pyright>=1.1.411",
+  "pytest>=9.2.0",
+  "ruff>=0.9",
+  "scipy-stubs==1.18.0.1",
+]
+
+[project.scripts]
+robot-motion-forge = "robot_motion_forge.application.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/robot_motion_forge"]
+
+[tool.pytest]
+minversion = "9.2.0"
+addopts = ["--import-mode=importlib", "-ra"]
+testpaths = ["tests"]
+strict = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
+
+[tool.pyright]
+include = ["src", "tests", "typings"]
+extraPaths = ["src"]
+stubPath = "typings"
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+reportUnnecessaryTypeIgnoreComment = "error"

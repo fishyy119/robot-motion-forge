@@ -1,0 +1,4 @@
+*
+!.gitignore
+!robot-definition.schema.json
+!robot.example.json

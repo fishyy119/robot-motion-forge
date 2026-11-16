@@ -1,0 +1,18 @@
+{
+  "files.exclude": {
+    "**/__pycache__": true
+  },
+  "files.associations": {
+    "**/configs/robots/*.json": "jsonc",
+    "**/configs/robots/*.schema.json": "json"
+  },
+  "json.schemas": [
+    {
+      "fileMatch": [
+        "/configs/robots/*.json",
+        "!/configs/robots/*.schema.json"
+      ],
+      "url": "./configs/robots/robot-definition.schema.json"
+    }
+  ]
+}
