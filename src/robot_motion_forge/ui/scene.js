@@ -85,7 +85,7 @@
             }
             // 原生组件会在切换主题时重建材质，因此在绘制前补齐置顶属性。
             for (const [name, ref] of Object.entries(m.nodeRefFromName)) {
-                if (!name.startsWith("/end_effectors/")) continue;
+                if (!name.startsWith("/frames/")) continue;
                 const root = ref?.current ?? ref;
                 if (!root?.traverse) continue;
                 roots.add(root);
@@ -117,7 +117,7 @@
                 const ref = m.nodeRefFromName[name];
                 const root = ref?.current ?? ref;
                 if (label && root?.traverse) {
-                    targets.set(root, { label, priority: name.startsWith("/end_effectors/") ? 0 : name === "/target" ? 1 : 2 });
+                    targets.set(root, { label, priority: name.startsWith("/frames/") ? 0 : name === "/target" ? 1 : 2 });
                 }
             }
             let selected = null;

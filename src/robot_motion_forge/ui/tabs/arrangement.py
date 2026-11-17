@@ -22,9 +22,9 @@ class ArrangementActions(Protocol):
     def delete_key(self) -> None: ...
     def history(self, redo: bool) -> None: ...
     def select_key(self, key_id: str | None) -> None: ...
-    def set_name(self, key_id: str, value: str) -> None: ...
-    def set_time(self, key_id: str, value: float) -> None: ...
-    def set_locked(self, key_id: str, value: bool) -> None: ...
+    def update_key(
+        self, key_id: str, *, time: float | None = None, name: str | None = None, locked: bool | None = None
+    ) -> None: ...
 
 
 class ArrangementTab:
@@ -56,9 +56,9 @@ class ArrangementTab:
             return partial(actions.select_key, self._key_id)
 
         self._key_select.on_update(controls.client_action(prepare_selection))
-        self._bind_property(controls, self._key_name, actions.set_name)
-        self._bind_property(controls, self._key_time, actions.set_time)
-        self._bind_property(controls, self._key_locked, actions.set_locked)
+        self._bind_property(controls, self._key_name, lambda key, value: actions.update_key(key, name=value))
+        self._bind_property(controls, self._key_time, lambda key, value: actions.update_key(key, time=value))
+        self._bind_property(controls, self._key_locked, lambda key, value: actions.update_key(key, locked=value))
 
     @property
     def _key_id(self) -> str | None:

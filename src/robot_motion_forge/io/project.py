@@ -8,6 +8,7 @@ from typing import Literal, NamedTuple
 import numpy as np
 from pydantic import Field
 
+from robot_motion_forge.motion.constraints import EditConstraints
 from robot_motion_forge.motion.draft import Draft
 from robot_motion_forge.motion.project import Project
 from robot_motion_forge.motion.trajectory import Trajectory, validate_trajectory
@@ -21,7 +22,7 @@ class SavedDraft(MotionModel):
     qpos: list[float]
     cursor: float = Field(ge=0)
     selected_key: Name | None
-    locked_joints: JointNames
+    constraints: EditConstraints
 
 
 class SavedSolution(MotionModel):
@@ -34,7 +35,7 @@ class SavedSolution(MotionModel):
 
 
 class ProjectFile(MotionModel):
-    schema_version: Literal[9]
+    schema_version: Literal[13]
     joint_names: JointNames
     project: Project
     draft: SavedDraft
@@ -65,7 +66,7 @@ def save_project(
             message=trajectory.message,
         )
     document = ProjectFile(
-        schema_version=9,
+        schema_version=13,
         joint_names=robot.joint_names.copy(),
         project=project,
         # 显式保存选中帧，保留同一时刻尚未入帧的不同草稿姿态。
@@ -73,7 +74,7 @@ def save_project(
             qpos=draft.qpos.tolist(),
             cursor=draft.cursor,
             selected_key=draft.selected_key,
-            locked_joints=sorted(draft.locked_joints),
+            constraints=draft.constraints.model_copy(deep=True),
         ),
         solution=saved,
     )
@@ -91,7 +92,7 @@ def load_project(path: Path, robot: Robot) -> LoadedProject:
         qpos=np.asarray(document.draft.qpos, dtype=float),
         cursor=document.draft.cursor,
         selected_key=document.draft.selected_key,
-        locked_joints=set(document.draft.locked_joints),
+        constraints=document.draft.constraints.model_copy(deep=True),
     )
     draft.validate(robot, project)
     saved = document.solution

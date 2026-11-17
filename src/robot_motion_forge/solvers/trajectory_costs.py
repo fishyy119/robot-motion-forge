@@ -5,7 +5,8 @@ from collections.abc import Sequence
 import numpy as np
 import pyceres
 
-from robot_motion_forge.robot.model import FloatArray, Robot, rotation
+from robot_motion_forge.robot.model import FloatArray, Robot
+from robot_motion_forge.rotations import rotation_from_wxyz
 
 type Parameters = Sequence[FloatArray]
 
@@ -103,12 +104,12 @@ class RotationReferenceCost(pyceres.CostFunction):
         super().__init__()
         self.set_num_residuals(3)
         self.set_parameter_block_sizes([4])
-        self.target_inverse = rotation(target).inv()
+        self.target_inverse = rotation_from_wxyz(target).inv()
         self.weight = weight
 
     def Evaluate(self, parameters: Parameters, residuals: FloatArray, jacobians: Jacobians) -> bool:
         value = parameters[0]
-        error = (self.target_inverse * rotation(value)).as_rotvec()
+        error = (self.target_inverse * rotation_from_wxyz(value)).as_rotvec()
         residuals[:] = self.weight * error
         if jacobians is not None:
             derivative = self.weight * inverse_right_jacobian(error) @ quaternion_lift(value)
@@ -126,7 +127,7 @@ class RotationDifferenceCost(pyceres.CostFunction):
         self.coefficients = tuple(coefficients)
 
     def Evaluate(self, parameters: Parameters, residuals: FloatArray, jacobians: Jacobians) -> bool:
-        orientations = rotation(np.asarray(parameters))
+        orientations = rotation_from_wxyz(np.asarray(parameters))
         errors = (orientations[:-1].inv() * orientations[1:]).as_rotvec()
         residuals[:] = np.asarray(self.coefficients) @ errors
         if jacobians is not None:

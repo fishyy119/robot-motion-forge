@@ -5,13 +5,12 @@ import json
 from typing import Self
 
 import numpy as np
-from numpy.typing import ArrayLike
 from pydantic import Field, model_validator
 
 from robot_motion_forge.robot.model import FloatArray, Robot
 
-from .trajectory import Trajectory, interpolate
-from .types import EndEffectorTask, Keyframe, MotionModel, Name, SolverSettings
+from .trajectory import Trajectory
+from .types import FrameTask, Keyframe, MotionModel, Name, SolverSettings
 
 
 class Project(MotionModel):
@@ -19,7 +18,7 @@ class Project(MotionModel):
     fps: float = Field(default=30.0, ge=1, le=1000)
     keyframes: list[Keyframe] = Field(min_length=1)
     settings: SolverSettings = Field(default_factory=SolverSettings)
-    end_effector_tasks: dict[Name, EndEffectorTask] = Field(default_factory=dict[str, EndEffectorTask])
+    frame_tasks: dict[Name, FrameTask] = Field(default_factory=dict[str, FrameTask])
 
     @model_validator(mode="after")
     def check_timeline(self) -> Self:
@@ -44,7 +43,7 @@ class Project(MotionModel):
                 Keyframe(time=0.0, qpos=qpos.copy(), name="起始"),
                 Keyframe(time=2.0, qpos=qpos.copy(), name="结束"),
             ],
-            end_effector_tasks={name: EndEffectorTask() for name in robot.end_effectors},
+            frame_tasks={name: FrameTask(mode=frame.trajectory_mode) for name, frame in robot.frames.items()},
         )
 
     def validated(self, robot: Robot) -> Self:
@@ -56,47 +55,40 @@ class Project(MotionModel):
         """依赖当前模型的检查；字段与时间关系由 Pydantic 校验。"""
         for key in self.keyframes:
             key.qpos = robot.validate_qpos(key.qpos).tolist()
-        for name, task in self.end_effector_tasks.items():
-            effector = robot.end_effector(name)
+        for name, task in self.frame_tasks.items():
+            frame = robot.frame(name)
             if task.reference_body is not None:
                 robot.body_id(task.reference_body)
-                if task.reference_body == effector.body:
-                    raise ValueError(f"末端 {name} 的参考连杆不能是自身连杆")
-        if self.settings.foot_support:
-            feet = {name: effector for name, effector in robot.end_effectors.items() if effector.foot}
-            if not feet:
-                raise ValueError("机器人未配置足部末端")
-            for name, effector in feet.items():
-                if not effector.support_polygon_cm:
-                    raise ValueError(f"足部末端 {name} 未配置足底轮廓")
+                if task.reference_body == frame.body:
+                    raise ValueError(f"坐标系 {name} 的参考连杆不能是自身连杆")
+        if self.settings.foot_support and not robot.support_polygons:
+            raise ValueError("机器人未配置支撑轮廓")
 
     @property
-    def uses_end_effector_tasks(self) -> bool:
+    def uses_frame_tasks(self) -> bool:
         settings = self.settings
-        return any(task.mode != "none" and task.weight > 0 for task in self.end_effector_tasks.values()) and (
-            settings.end_effector_reference > 0
-            or settings.end_effector_velocity > 0
-            or settings.end_effector_acceleration > 0
+        return any(task.mode is not None and task.weight > 0 for task in self.frame_tasks.values()) and (
+            settings.frame_reference > 0 or settings.frame_velocity > 0 or settings.frame_acceleration > 0
         )
 
     def solve_fingerprint(self) -> str:
         content = {
             "duration": self.duration,
             "settings": self.settings.model_dump(),
-            "end_effector_tasks": {name: task.model_dump() for name, task in self.end_effector_tasks.items()},
+            "frame_tasks": {name: task.model_dump() for name, task in self.frame_tasks.items()},
             "keyframes": [
                 key.model_dump(exclude={"id", "name"}) for key in sorted(self.keyframes, key=lambda key: key.time)
             ],
         }
-        if self.uses_end_effector_tasks:
+        if self.uses_frame_tasks:
             content["task_output_fps"] = self.fps
         return hashlib.sha256(json.dumps(content, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
-    def seed(self, robot: Robot, times: ArrayLike) -> Trajectory:
+    def keyframe_trajectory(self) -> Trajectory:
         keys = sorted(self.keyframes, key=lambda k: k.time)
         return Trajectory(
-            np.asarray(times, dtype=float),
-            interpolate(robot, [k.time for k in keys], [k.qpos for k in keys], np.asarray(times)),
+            np.asarray([key.time for key in keys], dtype=float),
+            np.asarray([key.qpos for key in keys], dtype=float),
         )
 
     def output_times(self) -> FloatArray:

@@ -1,11 +1,12 @@
-"""从作者关键帧的正向运动学生成末端位置与 SO(3) 朝向参考曲线。"""
+"""从作者关键帧的正向运动学生成坐标系位置与 SO(3) 朝向参考曲线。"""
 
 import numpy as np
 from scipy.interpolate import PchipInterpolator
 from scipy.spatial.transform import RotationSpline
 
-from robot_motion_forge.robot.model import FloatArray, quaternion, rotation
+from robot_motion_forge.robot.model import FloatArray
 from robot_motion_forge.robot.task_frame import FrameState, TaskFrame
+from robot_motion_forge.rotations import rotation_from_wxyz, rotation_to_wxyz
 
 from .types import Keyframe
 
@@ -16,7 +17,7 @@ class TaskReference:
         self.times = np.asarray([key.time for key in keys])
         states = [frame.state(np.asarray(key.qpos)) for key in keys]
         self.positions = np.asarray([state.position for state in states])
-        self.orientations = rotation(np.asarray([quaternion(state.orientation) for state in states]))
+        self.orientations = rotation_from_wxyz(np.asarray([rotation_to_wxyz(state.orientation) for state in states]))
         self.position_curve = PchipInterpolator(self.times, self.positions, axis=0) if len(keys) > 1 else None
         self.rotation_curve = RotationSpline(self.times, self.orientations) if len(keys) > 1 else None
 

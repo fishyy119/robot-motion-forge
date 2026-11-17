@@ -16,6 +16,10 @@ if TYPE_CHECKING:
         GuiSliderHandle,
     )
 
+    from robot_motion_forge.robot.definition import ControlMode
+
+CONTROL_MODES: dict[str, ControlMode] = {"位置": "position", "朝向": "orientation", "位姿": "pose"}
+
 
 class _ClientEvent[HandleT](Protocol):
     @property

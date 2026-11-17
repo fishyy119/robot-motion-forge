@@ -59,6 +59,9 @@ class ForgeApp:
         self._notifications = Notifications(self.server)
         self.dark_mode = True
         self._epoch = 0
+        # 运行期间机器人固定；场景和拖拽控件不随工程界面重建。
+        self.view = RobotView(self.server, editor.robot)
+        self.drag = DragControls(self.server)
         self._build(project_path)
 
         def on_connect(client: ClientHandle) -> None:
@@ -70,16 +73,26 @@ class ForgeApp:
 
         def on_scene_click(event: SceneClickEvent) -> None:
             # 原生坐标系捕获的手势不会进入场景点击；拾取与姿态更新统一在主线程执行。
-            epoch, pose = self._epoch, self.pose
+            epoch = self._epoch
             self._events.put(
                 _QueuedAction(
                     epoch=epoch,
-                    action=lambda: pose.select_at(event.ray_origin, event.ray_direction),
+                    action=lambda: self.pose.select_at(event.ray_origin, event.ray_direction),
                     client=event.client,
                 )
             )
 
         self.server.scene.on_click()(on_scene_click)
+
+        def on_marker_click(event: SceneNodePointerEvent[IcosphereHandle]) -> None:
+            epoch = self._epoch
+            frame = event.target.name.removeprefix("/frames/")
+            self._events.put(
+                _QueuedAction(epoch=epoch, action=lambda: self.pose.select_object(frame), client=event.client)
+            )
+
+        for marker in self.view.markers.values():
+            marker.on_click(on_marker_click)
 
     def _build(self, project_path: Path) -> None:
         self._epoch += 1
@@ -94,12 +107,10 @@ class ForgeApp:
 
         controls = Controls(gui, enqueue)
         state = e.snapshot()
-        self.view = RobotView(self.server, e.robot)
         self.sidebar = Sidebar(
             controls, robot=e.robot, project=state.project, qpos=state.draft.qpos, project_path=project_path
         )
         self.playback_panel = PlaybackPanel(controls, project=state.project, cursor=state.draft.cursor)
-        self.drag = DragControls(self.server)
         self.playback = PlaybackController(
             e, self.playback_panel.timeline, reset_target=lambda: self.pose.reset_target()
         )
@@ -135,14 +146,6 @@ class ForgeApp:
             notifications=self._notifications,
         )
         self._bind_actions()
-        pose = self.pose
-
-        def on_marker_click(event: SceneNodePointerEvent[IcosphereHandle]) -> None:
-            end_effector = event.target.name.removeprefix("/end_effectors/")
-            enqueue(lambda: pose.select_object(end_effector), event.client)
-
-        for marker in self.view.markers.values():
-            marker.on_click(on_marker_click)
         self._apply_theme()
 
     def _bind_actions(self) -> None:
@@ -158,9 +161,10 @@ class ForgeApp:
 
     def _replace_project(self, editor: Editor, path: Path) -> None:
         self.solve.close("工程已重新加载")
+        self.drag.hide()
         self.editor = editor
         self.server.gui.reset()
-        self.server.scene.reset()
+        self.view.bind_gui()
         self._build(path)
 
     def _change_theme(self) -> None:

@@ -1,12 +1,12 @@
 {
   "$defs": {
-    "EndEffector": {
+    "ControlFrame": {
       "additionalProperties": false,
-      "description": "固定在连杆上的末端坐标系；原点可偏移，坐标轴与连杆对齐。",
+      "description": "固定在连杆上的控制坐标系；原点可偏移，坐标轴与连杆对齐。",
       "properties": {
         "body": {
           "$ref": "#/$defs/Name",
-          "description": "末端坐标系所附着的 MuJoCo 连杆名称"
+          "description": "控制坐标系所附着的 MuJoCo 连杆名称"
         },
         "offset_m": {
           "$ref": "#/$defs/Vector3",
@@ -15,16 +15,10 @@
             0.0,
             0.0
           ],
-          "description": "末端坐标系原点在连杆局部坐标中的位置，单位 m"
-        },
-        "foot": {
-          "default": false,
-          "description": "是否为足部末端",
-          "title": "Foot",
-          "type": "boolean"
+          "description": "控制坐标系原点在连杆局部坐标中的位置，单位 m"
         },
         "support_polygon_cm": {
-          "description": "足底接触轮廓顶点，末端局部坐标，单位 cm；至少三个共面且不共线的点",
+          "description": "足底接触轮廓顶点，控制坐标系局部坐标，单位 cm；至少三个共面且不共线的点",
           "items": {
             "$ref": "#/$defs/Vector3"
           },
@@ -32,21 +26,48 @@
           "type": "array"
         },
         "control_mode": {
-          "description": "默认交互目标：位置、朝向或完整位姿；足部默认为完整位姿，其余末端默认为位置；可在界面中切换",
-          "enum": [
-            "position",
-            "orientation",
-            "pose"
+          "$ref": "#/$defs/ControlMode",
+          "default": "position",
+          "description": "默认交互目标：位置、朝向或完整位姿；省略时为位置；可在界面中切换"
+        },
+        "fixed_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ControlMode"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "title": "Control Mode",
-          "type": "string"
+          "default": null,
+          "description": "新会话的默认固定分量：位置、朝向或完整位姿；省略时不固定"
+        },
+        "trajectory_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ControlMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "新工程的默认轨迹求解分量：位置、朝向或完整位姿；省略时禁用"
         }
       },
       "required": [
         "body"
       ],
-      "title": "EndEffector",
+      "title": "ControlFrame",
       "type": "object"
+    },
+    "ControlMode": {
+      "enum": [
+        "position",
+        "orientation",
+        "pose"
+      ],
+      "type": "string"
     },
     "HomePose": {
       "additionalProperties": false,
@@ -61,7 +82,7 @@
             }
           ],
           "default": null,
-          "description": "初始根位置，单位 m；省略时使用模型 qpos0"
+          "description": "torso 初始位置，单位 m；省略时使用模型 qpos0"
         },
         "quaternion_wxyz": {
           "anyOf": [
@@ -73,7 +94,7 @@
             }
           ],
           "default": null,
-          "description": "初始根方向，wxyz；读入后归一化"
+          "description": "torso 初始朝向，wxyz；读入后归一化"
         },
         "joints_rad": {
           "additionalProperties": {
@@ -101,6 +122,19 @@
       "title": "HomePose",
       "type": "object"
     },
+    "JointRange": {
+      "maxItems": 2,
+      "minItems": 2,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/Number"
+        },
+        {
+          "$ref": "#/$defs/Number"
+        }
+      ],
+      "type": "array"
+    },
     "ModelConfig": {
       "additionalProperties": false,
       "properties": {
@@ -114,18 +148,24 @@
         },
         "model": {
           "$ref": "#/$defs/Name",
-          "description": "本地纯机器人 MJCF 路径，不含地面等场景对象；支持相对本定义的路径、~ 和环境变量"
+          "description": "本地纯机器人 MJCF 路径，不含地面等场景对象；相对机器人仓库根目录解析，也支持绝对路径、~ 和环境变量"
         },
-        "root_body": {
-          "$ref": "#/$defs/Name",
-          "description": "MuJoCo 模型中的机器人根连杆名称"
+        "joint_limit_overrides": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JointRange"
+          },
+          "description": "覆盖模型关节限位，值为 [下限, 上限]；hinge 使用 rad，slide 使用 m；未列出的关节沿用模型限位",
+          "propertyNames": {
+            "$ref": "#/$defs/Name"
+          },
+          "title": "Joint Limit Overrides",
+          "type": "object"
         }
       },
       "required": [
         "name",
         "repository_root",
-        "model",
-        "root_body"
+        "model"
       ],
       "title": "ModelConfig",
       "type": "object"
@@ -195,15 +235,15 @@
     "home": {
       "$ref": "#/$defs/HomePose"
     },
-    "end_effectors": {
+    "frames": {
       "additionalProperties": {
-        "$ref": "#/$defs/EndEffector"
+        "$ref": "#/$defs/ControlFrame"
       },
-      "description": "逻辑名称到末端坐标系定义的映射",
+      "description": "逻辑名称到控制坐标系定义的映射",
       "propertyNames": {
         "$ref": "#/$defs/Name"
       },
-      "title": "End Effectors",
+      "title": "Frames",
       "type": "object"
     },
     "joint_groups": {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -10,13 +11,14 @@ from numpy.typing import ArrayLike
 from scipy.interpolate import PchipInterpolator
 from scipy.spatial.transform import Slerp
 
-from robot_motion_forge.robot.model import FloatArray, Robot, quaternion, rotation
+from robot_motion_forge.robot.model import FloatArray, Robot
+from robot_motion_forge.rotations import rotation_from_wxyz, rotation_to_wxyz
 
 if TYPE_CHECKING:
     from .project import Project
 
 
-@dataclass
+@dataclass(frozen=True)
 class Trajectory:
     times: FloatArray
     qpos: FloatArray
@@ -24,19 +26,31 @@ class Trajectory:
     converged: bool = False
     message: str = ""
 
+    def __post_init__(self) -> None:
+        # 节点由轨迹独立持有且只读，插值器可在整个轨迹生命周期内复用。
+        times = np.array(self.times, dtype=float, copy=True)
+        qpos = np.array(self.qpos, dtype=float, copy=True)
+        times.flags.writeable = qpos.flags.writeable = False
+        object.__setattr__(self, "times", times)
+        object.__setattr__(self, "qpos", qpos)
+
+    @cached_property
+    def _qpos_curve(self) -> PchipInterpolator:
+        return PchipInterpolator(self.times, self.qpos, axis=0)
+
+    @cached_property
+    def _rotation_curve(self) -> Slerp:
+        return Slerp(self.times, rotation_from_wxyz(self.qpos[:, 3:7]))
+
     def sample(self, robot: Robot, times: ArrayLike) -> FloatArray:
-        return interpolate(robot, self.times, self.qpos, np.asarray(times, dtype=float))
-
-
-def interpolate(robot: Robot, times: ArrayLike, qpos: ArrayLike, query: ArrayLike) -> FloatArray:
-    times, qpos = np.asarray(times, dtype=float), np.asarray(qpos, dtype=float)
-    query = np.clip(np.asarray(query), times[0], times[-1])
-    if len(times) == 1:
-        return np.repeat(qpos[:1], len(query), axis=0)
-    result = PchipInterpolator(times, qpos, axis=0)(query)
-    if robot.floating:
-        result[:, 3:7] = quaternion(Slerp(times, rotation(qpos[:, 3:7]))(query))
-    return result
+        """返回独立可写的姿态数组，查询时刻截取到节点覆盖范围内。"""
+        query = np.clip(np.asarray(times, dtype=float), self.times[0], self.times[-1])
+        if len(self.times) == 1:
+            return np.repeat(self.qpos[:1], len(query), axis=0)
+        result = self._qpos_curve(query)
+        if robot.floating:
+            result[:, 3:7] = rotation_to_wxyz(self._rotation_curve(query))
+        return result
 
 
 def validate_trajectory(robot: Robot, project: Project, trajectory: Trajectory) -> None:

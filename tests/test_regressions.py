@@ -12,7 +12,8 @@ from robot_motion_forge.io.export import export_motion
 from robot_motion_forge.io.project import load_project
 from robot_motion_forge.motion.project import Project
 from robot_motion_forge.motion.types import Keyframe, PoseTarget
-from robot_motion_forge.robot.model import Robot, quaternion, rotation
+from robot_motion_forge.robot.model import Robot
+from robot_motion_forge.rotations import rotation_from_wxyz, rotation_to_wxyz
 from robot_motion_forge.solvers.trajectory import optimize
 from robot_motion_forge.validation.trajectory import check_geometry
 
@@ -33,10 +34,11 @@ def test_ik_and_drag_preserve_valid_poses_when_targets_are_unreachable(robot: Ro
     assert not result.success
     assert np.array_equal(editor.snapshot().draft.qpos, previous)
 
-    editor.lock_joint("shoulder")
+    editor.set_joint_locked("shoulder", True)
     target = PoseTarget("hand", [1.0, 1.0, 0.6])
     position, _ = robot.pose(robot.forward(previous), "hand")
-    followed = editor.drag_target(target, lock_base=False)
+    editor.set_anchor("torso", None)
+    followed = editor.drag_target(target)
     assert followed.applied and followed.state == "projected"
     assert followed.position_error < np.linalg.norm(position - target.position)
     qpos = editor.snapshot().draft.qpos
@@ -74,10 +76,10 @@ def test_edits_are_undoable_and_invalidate_old_solutions(robot: Robot, project: 
 
 
 def test_optimization_preserves_authored_poses_times_and_joint_limits(robot: Robot, project: Project) -> None:
-    project.keyframes[0].qpos[3:7] = quaternion(Rotation.from_euler("z", 170, degrees=True)).tolist()
-    project.keyframes[-1].qpos[3:7] = quaternion(Rotation.from_euler("z", -170, degrees=True)).tolist()
+    project.keyframes[0].qpos[3:7] = rotation_to_wxyz(Rotation.from_euler("z", 170, degrees=True)).tolist()
+    project.keyframes[-1].qpos[3:7] = rotation_to_wxyz(Rotation.from_euler("z", -170, degrees=True)).tolist()
     pose = robot.home.copy()
-    pose[3:7] = quaternion(Rotation.from_euler("z", 180, degrees=True))
+    pose[3:7] = rotation_to_wxyz(Rotation.from_euler("z", 180, degrees=True))
     pose[-1] = 1.5
     project.keyframes.append(Keyframe(time=0.1000000001, qpos=pose.tolist(), name="动作顶点"))
 
@@ -91,7 +93,7 @@ def test_optimization_preserves_authored_poses_times_and_joint_limits(robot: Rob
     assert np.all(frames[:, robot.qadr] >= robot.lower - 1e-9)
     assert np.all(frames[:, robot.qadr] <= robot.upper + 1e-9)
     assert np.allclose(np.linalg.norm(frames[:, 3:7], axis=1), 1)
-    orientations = rotation(frames[:, 3:7])
+    orientations = rotation_from_wxyz(frames[:, 3:7])
     angular_path = (orientations[:-1].inv() * orientations[1:]).magnitude().sum()
     assert angular_path < np.deg2rad(30)
 
@@ -100,7 +102,7 @@ def test_project_restores_draft_joint_locks_and_solution(robot: Robot, project: 
     editor = Editor(robot, project)
     editor.seek(0.12)
     editor.set_joint("shoulder", 0.4)
-    editor.lock_joint("shoulder")
+    editor.set_joint_locked("shoulder", True)
     solution = editor.preview()
     editor.install_solution(solution, editor.snapshot().solve_fingerprint)
     path = tmp_path / "project.motion.json"
@@ -111,14 +113,14 @@ def test_project_restores_draft_joint_locks_and_solution(robot: Robot, project: 
     draft = restored.snapshot().draft
     assert draft.qpos[-1] == 0.4
     assert draft.cursor == 0.12
-    assert draft.locked_joints == {"shoulder"}
+    assert draft.constraints.locked_joints == ["shoulder"]
     assert saved_solution is not None
     assert np.array_equal(saved_solution.qpos, solution.qpos)
 
 
 def test_export_preserves_sampling_and_gmr_conventions(robot: Robot, project: Project, tmp_path: Path) -> None:
     for key in project.keyframes:
-        key.qpos[3:7] = quaternion(Rotation.from_euler("z", 0.4)).tolist()
+        key.qpos[3:7] = rotation_to_wxyz(Rotation.from_euler("z", 0.4)).tolist()
     project.keyframes[-1].qpos[-1] = 0.3
     trajectory = Editor(robot, project).preview()
     pkl_path = tmp_path / "motion.pkl"

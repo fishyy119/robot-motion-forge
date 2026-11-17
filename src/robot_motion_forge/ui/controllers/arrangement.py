@@ -36,16 +36,7 @@ class ArrangementController:
         self._editor.capture("关键帧")
         self._notifications.show("关键帧已添加")
 
-    def set_name(self, key_id: str, value: str) -> None:
-        self._update_key(key_id, name=value)
-
-    def set_time(self, key_id: str, value: float) -> None:
-        self._update_key(key_id, time=value)
-
-    def set_locked(self, key_id: str, value: bool) -> None:
-        self._update_key(key_id, locked=value)
-
-    def _update_key(
+    def update_key(
         self, key_id: str, *, time: float | None = None, name: str | None = None, locked: bool | None = None
     ) -> None:
         self._pause()

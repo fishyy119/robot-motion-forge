@@ -10,12 +10,15 @@ import numpy as np
 from numpy.typing import ArrayLike
 
 from robot_motion_forge.motion.types import PoseTarget
-from robot_motion_forge.robot.model import FloatArray, rotation
+from robot_motion_forge.robot.model import FloatArray
+from robot_motion_forge.rotations import rotation_from_wxyz
 
-from .theme import accent_color, warning_color
+from .theme import warning_color
 
 if TYPE_CHECKING:
     from viser import ClientHandle, TransformControlsEvent, ViserServer
+
+    from robot_motion_forge.robot.definition import ControlMode
 
 
 @dataclass(frozen=True)
@@ -64,7 +67,8 @@ class DragControls:
             "/drag/actual",
             axes_length=0.035,
             axes_radius=0.0015,
-            origin_color=(55, 210, 184),
+            # 实际位置沿用部位锚点显示；额外坐标系只显示方向，不叠加彩色原点球。
+            origin_radius=0.0,
             visible=False,
         )
         self.error_line = server.scene.add_line_segments(
@@ -93,11 +97,11 @@ class DragControls:
                 if active is None:
                     return
                 if isinstance(active, _JointFrame):
-                    frame = rotation(active.quaternion)
+                    frame = rotation_from_wxyz(active.quaternion)
                     if active.slide:
                         delta = float(np.dot(position - active.position, frame.apply((0.0, 0.0, 1.0))))
                     else:
-                        relative = (frame.inv() * rotation(quat)).as_matrix()
+                        relative = (frame.inv() * rotation_from_wxyz(quat)).as_matrix()
                         angle = float(np.arctan2(relative[1, 0], relative[0, 0]))
                         # 累加相邻事件的最短角差，转环跨越 ±π 时关节值仍连续。
                         self._angle += (angle - self._last_angle + np.pi) % (2 * np.pi) - np.pi
@@ -106,7 +110,7 @@ class DragControls:
                     self._pending = JointTarget(active.name, active.value + delta)
                 else:
                     self._pending = PoseTarget(
-                        active.end_effector,
+                        active.frame,
                         position.tolist(),
                         quat.tolist() if active.quaternion is not None else None,
                         track_position=active.track_position,
@@ -119,7 +123,6 @@ class DragControls:
     def set_theme(self, *, dark_mode: bool) -> None:
         warning = warning_color(dark_mode)
         self.requested.color = warning
-        self.actual.origin_color = accent_color(dark_mode)
         self.error_line.colors = np.asarray([[warning, warning]], dtype=np.uint8)
 
     def consume(self) -> DragInput:
@@ -156,17 +159,18 @@ class DragControls:
 
     def show(
         self,
-        end_effector: str,
+        frame: str,
         position: ArrayLike,
         quaternion: ArrayLike,
         *,
-        track_position: bool = True,
-        track_orientation: bool = False,
+        mode: ControlMode = "position",
         target: PoseTarget | None = None,
     ) -> None:
+        track_position = mode != "orientation"
+        track_orientation = mode != "position"
         with self._lock:
             self._selection = PoseTarget(
-                end_effector,
+                frame,
                 np.asarray(position, dtype=float).tolist(),
                 np.asarray(quaternion, dtype=float).tolist() if track_orientation else None,
                 track_position=track_position,
@@ -177,7 +181,7 @@ class DragControls:
         self.gizmo.disable_axes = self.gizmo.disable_sliders = not track_position
         self.gizmo.disable_rotations = not track_orientation
         if not track_orientation:
-            # 纯位置拖拽固定使用世界轴，不随末端连杆的朝向变化。
+            # 纯位置拖拽固定使用世界轴，不随目标连杆的朝向变化。
             self.gizmo.wxyz = (1.0, 0.0, 0.0, 0.0)
         visible = target is not None
         self.requested.visible = self.error_line.visible = visible and track_position

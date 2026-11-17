@@ -1,4 +1,4 @@
-"""工程保存、重新加载与浏览器数据导出。"""
+"""工程保存与重新加载。"""
 
 from __future__ import annotations
 
@@ -7,13 +7,10 @@ from typing import TYPE_CHECKING
 
 from robot_motion_forge.application.editor import Editor
 from robot_motion_forge.application.workspace import Workspace
-from robot_motion_forge.io.export import serialize_motion
 from robot_motion_forge.io.project import load_project
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from viser import ClientHandle
 
     from ..notifications import Notifications
     from ..tabs.project import ProjectTab
@@ -47,9 +44,3 @@ class ProjectController:
         editor = Editor(self._editor.robot, loaded.project, loaded.trajectory, draft=loaded.draft)
         self._replace_project(editor, path)
         self._notifications.show("工程已重新加载", path.name)
-
-    def export(self, client: ClientHandle) -> None:
-        state = self._editor.snapshot()
-        payload = serialize_motion(self._editor.robot, state.project, self._editor.preview())
-        # Viser 下载流程自带接收完成通知。
-        client.send_file_download("motion.pkl", payload, save_immediately=True)

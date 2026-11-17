@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from robot_motion_forge.motion.project import Project
-from robot_motion_forge.robot.definition import EndEffector, HomePose, ModelConfig, RobotDefinition
+from robot_motion_forge.robot.definition import ControlFrame, HomePose, ModelConfig, RobotDefinition
 from robot_motion_forge.robot.model import Robot
 
 
@@ -39,12 +39,13 @@ def robot(tmp_path: Path) -> Robot:
         encoding="utf-8",
     )
     config = RobotDefinition(
-        robot=ModelConfig(name="test", repository_root=str(tmp_path), model=str(model_path), root_body="base"),
+        robot=ModelConfig(name="test", repository_root=str(tmp_path), model="robot.xml"),
         home=HomePose(joints_rad={"shoulder": 0.0}, quaternion_wxyz=(1.0, 0.0, 0.0, 0.0)),
-        end_effectors={
-            "left_foot": EndEffector(body="left_foot", offset_m=(0.0, 0.0, -0.05), foot=True),
-            "right_foot": EndEffector(body="right_foot", offset_m=(0.0, 0.0, -0.05), foot=True),
-            "hand": EndEffector(body="hand"),
+        frames={
+            "torso": ControlFrame(body="base", fixed_mode="pose"),
+            "left_foot": ControlFrame(body="left_foot", offset_m=(0.0, 0.0, -0.05), control_mode="pose"),
+            "right_foot": ControlFrame(body="right_foot", offset_m=(0.0, 0.0, -0.05), control_mode="pose"),
+            "hand": ControlFrame(body="hand"),
         },
     )
     return Robot(config, config_path=tmp_path / "configs" / "robots" / "robot.json")

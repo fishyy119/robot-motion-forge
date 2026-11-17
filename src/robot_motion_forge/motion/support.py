@@ -8,7 +8,7 @@ from numpy.typing import NDArray
 from scipy.spatial import ConvexHull, QhullError
 
 from robot_motion_forge.robot.environment import GROUND_HEIGHT_M
-from robot_motion_forge.robot.model import FloatArray, Robot, rotation
+from robot_motion_forge.robot.model import FloatArray, Robot
 
 CONTACT_POSITION_TOLERANCE_M = 0.01
 CONTACT_ROTATION_TOLERANCE_RAD = np.deg2rad(5.0)
@@ -32,14 +32,13 @@ class FootContact:
 
 def foot_contacts(robot: Robot, data: mj.MjData, *, names: tuple[str, ...] | None = None) -> tuple[FootContact, ...]:
     contacts: list[FootContact] = []
-    for name, effector in robot.end_effectors.items():
-        if not effector.foot or not effector.support_polygon_cm or (names is not None and name not in names):
+    for name, polygon in robot.support_polygons.items():
+        if names is not None and name not in names:
             continue
-        local = np.asarray(effector.support_polygon_cm, dtype=float) / 100.0
-        _, _, axes = np.linalg.svd(local - local[0], full_matrices=False)
-        position, orientation = robot.pose(data, name)
-        transform = rotation(orientation)
-        contacts.append(FootContact(name, position + transform.apply(local), transform.apply(axes[-1])))
+        site = polygon.site_id
+        position = data.site_xpos[site, :]
+        matrix = data.site_xmat[site, :].reshape(3, 3)
+        contacts.append(FootContact(name, position + polygon.vertices_m @ matrix.T, matrix @ polygon.normal))
     return tuple(contacts)
 
 

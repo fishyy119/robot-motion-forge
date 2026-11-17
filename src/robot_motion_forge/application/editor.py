@@ -10,10 +10,12 @@ import numpy as np
 from numpy.typing import ArrayLike
 
 from robot_motion_forge.io.project import save_project
+from robot_motion_forge.motion.constraints import EditConstraints
 from robot_motion_forge.motion.draft import Draft
 from robot_motion_forge.motion.project import Project
 from robot_motion_forge.motion.trajectory import Trajectory, validate_trajectory
-from robot_motion_forge.motion.types import EndEffectorTask, Keyframe, PoseTarget, SolverSettings
+from robot_motion_forge.motion.types import FrameTask, Keyframe, PoseTarget, SolverSettings
+from robot_motion_forge.robot.definition import ControlMode
 from robot_motion_forge.robot.model import FloatArray, Robot
 from robot_motion_forge.solvers.drag import DragResult, follow_target
 from robot_motion_forge.solvers.ik import IKResult, solve_ik
@@ -37,7 +39,7 @@ class Editor:
     ) -> None:
         self.robot = robot
         project = (project or Project.new(robot)).validated(robot)
-        initial_draft = deepcopy(draft) if draft is not None else Draft(robot.home.copy())
+        initial_draft = deepcopy(draft) if draft is not None else Draft.initial(robot)
         initial_draft.validate(robot, project)
         self._state = EditorSnapshot(project, initial_draft, project.solve_fingerprint())
         if trajectory is not None:
@@ -57,6 +59,10 @@ class Editor:
     def snapshot(self) -> EditorSnapshot:
         """返回独立快照；会话修改统一通过编辑命令提交。"""
         return deepcopy(self._state)
+
+    @property
+    def constraints(self) -> EditConstraints:
+        return self._state.draft.constraints.model_copy(deep=True)
 
     def edit(self, operation: Callable[[Project, Draft], None], *, merge_key: tuple[str, str] | None = None) -> None:
         # 已提交工程只读；历史保留旧状态，候选修改在独立副本上执行。
@@ -120,8 +126,9 @@ class Editor:
         if self._preview is None:
             # 预览插值也保留非帧对齐关键帧，避免在二次插值中损失手工姿态。
             project = self._state.project
-            times = np.unique(np.r_[0.0, project.duration, [key.time for key in project.keyframes]])
-            self._preview = project.seed(self.robot, times)
+            keyframes = project.keyframe_trajectory()
+            times = np.unique(np.r_[0.0, project.duration, keyframes.times])
+            self._preview = Trajectory(times, keyframes.sample(self.robot, times))
         return self._preview
 
     def seek(self, time: float) -> None:
@@ -129,6 +136,7 @@ class Editor:
         draft = self._state.draft
         draft.cursor = float(np.clip(time, 0, self._state.project.duration))
         draft.qpos = self.preview().sample(self.robot, [draft.cursor])[0]
+        draft.constraints.reanchor(self.robot, draft.qpos)
         self.revision += 1
 
     def advance(self, elapsed: float) -> None:
@@ -156,14 +164,24 @@ class Editor:
 
     def set_settings(self, **values: float | int) -> None:
         settings = SolverSettings.model_validate({**self._state.project.settings.model_dump(), **values})
-        merge_key = ("settings", next(iter(values))) if len(values) == 1 else None
+        merge_key = (
+            ("settings", next(iter(values)))
+            if len(values) == 1 and not isinstance(next(iter(values.values())), bool)
+            else None
+        )
         self.edit(lambda project, draft: setattr(project, "settings", settings), merge_key=merge_key)
 
-    def set_end_effector_task(self, name: str, task: EndEffectorTask) -> None:
-        def operation(project: Project, draft: Draft) -> None:
-            project.end_effector_tasks[name] = task.model_copy(deep=True)
+    def set_frame_task(self, name: str, task: FrameTask) -> None:
+        current = self._state.project.frame_tasks.get(name, FrameTask())
 
-        self.edit(operation, merge_key=("end_effector_task", name))
+        def operation(project: Project, draft: Draft) -> None:
+            project.frame_tasks[name] = task.model_copy(deep=True)
+
+        # 模式和参考系切换各自撤销；同一任务的连续权重调整合并。
+        merge_key = (
+            ("frame_task", name) if (current.mode, current.reference_body) == (task.mode, task.reference_body) else None
+        )
+        self.edit(operation, merge_key=merge_key)
 
     def capture(self, name: str, *, locked: bool = True) -> None:
         key = Keyframe(
@@ -191,6 +209,7 @@ class Editor:
         self._state.draft.selected_key = key.id
         self._state.draft.cursor = key.time
         self._state.draft.qpos = np.asarray(key.qpos).copy()
+        self._state.draft.constraints.reanchor(self.robot, self._state.draft.qpos)
         self.revision += 1
 
     def update_key(
@@ -207,8 +226,9 @@ class Editor:
             if locked is not None:
                 key.locked = locked
 
-        field = "time" if time is not None else "name" if name is not None else "locked"
-        self.edit(operation, merge_key=(field, key_id))
+        fields = [field for field, value in {"time": time, "name": name, "locked": locked}.items() if value is not None]
+        merge_key = (fields[0], key_id) if len(fields) == 1 and fields[0] != "locked" else None
+        self.edit(operation, merge_key=merge_key)
 
     def delete_key(self, key_id: str) -> None:
         def operation(project: Project, draft: Draft) -> None:
@@ -218,7 +238,7 @@ class Editor:
 
         self.edit(operation)
 
-    def _set_pose(self, qpos: FloatArray, *, merge: bool = True, reset_locks: bool = False) -> None:
+    def _set_pose(self, qpos: FloatArray, *, merge: bool = True, constraints: EditConstraints | None = None) -> None:
         def operation(project: Project, draft: Draft) -> None:
             if draft.selected_key is not None:
                 key = next(key for key in project.keyframes if key.id == draft.selected_key)
@@ -227,52 +247,69 @@ class Editor:
                 else:
                     key.qpos = qpos.tolist()
             draft.qpos = qpos.copy()
-            if reset_locks:
-                draft.locked_joints.clear()
+            if constraints is not None:
+                draft.constraints = constraints.model_copy(deep=True)
 
         self.edit(operation, merge_key=("pose", self._state.draft.selected_key or "draft") if merge else None)
 
-    def lock_joint(self, name: str) -> None:
+    def set_joint_locked(self, name: str, locked: bool) -> None:
         if name not in self.robot.joint_names:
             raise ValueError(f"未知关节：{name}")
-        self.edit(lambda project, draft: draft.locked_joints.add(name))
 
-    def unlock_joint(self, name: str) -> None:
-        self.edit(lambda project, draft: draft.locked_joints.discard(name))
+        def operation(project: Project, draft: Draft) -> None:
+            joints = draft.constraints.locked_joints
+            if locked and name not in joints:
+                joints.append(name)
+            elif not locked and name in joints:
+                joints.remove(name)
+
+        self.edit(operation)
 
     def unlock_all_joints(self) -> None:
-        self.edit(lambda project, draft: draft.locked_joints.clear())
+        self.edit(lambda project, draft: draft.constraints.locked_joints.clear())
+
+    def set_anchor(self, name: str, mode: ControlMode | None) -> None:
+        self.robot.frame(name)
+
+        def operation(project: Project, draft: Draft) -> None:
+            if mode is None:
+                draft.constraints.anchors.pop(name, None)
+            elif name not in draft.constraints.anchors or draft.constraints.anchors[name].mode != mode:
+                draft.constraints.capture(self.robot, self.robot.forward(draft.qpos), name, mode)
+
+        self.edit(operation)
+
+    def clear_fixed_parts(self) -> None:
+        self.edit(lambda project, draft: draft.constraints.anchors.clear())
 
     def reset_pose(self) -> None:
-        self._set_pose(self.robot.home.copy(), merge=False, reset_locks=True)
+        initial = Draft.initial(self.robot)
+        self._set_pose(initial.qpos, merge=False, constraints=initial.constraints)
 
     def set_joint(self, name: str, value: float) -> None:
-        if name in self._state.draft.locked_joints:
+        if name in self._state.draft.constraints.locked_joints:
             raise ValueError(f"关节已锁定：{name}")
         candidate = self._state.draft.qpos.copy()
         candidate[self.robot.qadr[self.robot.joint_names.index(name)]] = value
         self._set_pose(self.robot.validate_qpos(candidate))
 
-    def move_target(self, target: PoseTarget, *, lock_base: bool = True) -> IKResult:
-        if target.end_effector not in self.robot.end_effectors:
-            raise ValueError("IK 仅用于机器人配置中定义的末端坐标系")
+    def move_target(self, target: PoseTarget) -> IKResult:
         result = solve_ik(
             self.robot,
             self._state.draft.qpos,
             [target],
-            lock_base=lock_base,
-            locked_joints=sorted(self._state.draft.locked_joints),
+            constraints=self._state.draft.constraints,
         )
-        # IK 失败不提交部分姿态；用户可以放松姿态方向或移动基座后重试。
+        # IK 失败不提交部分姿态；用户可以放松姿态方向或移动 torso 后重试。
         if result.success:
             self._set_pose(result.qpos)
         return result
 
     def move_root(self, position: ArrayLike, quaternion: ArrayLike) -> None:
         if not self.robot.floating:
-            raise ValueError("固定基座模型没有可编辑的自由基座")
+            raise ValueError("当前模型的 torso 没有可编辑的自由度")
         if np.shape(position) != (3,) or np.shape(quaternion) != (4,):
-            raise ValueError("基座位置需要三个分量，方向需要四个 wxyz 四元数分量")
+            raise ValueError("torso 位置需要三个分量，朝向需要四个 wxyz 四元数分量")
         candidate = self._state.draft.qpos.copy()
         candidate[:3], candidate[3:7] = position, quaternion
         self._set_pose(self.robot.validate_qpos(candidate))
@@ -281,18 +318,14 @@ class Editor:
         self,
         target: PoseTarget,
         *,
-        lock_base: bool = True,
         position_step: float = 0.003,
         rotation_step: float = np.pi / 60,
     ) -> DragResult:
-        if target.end_effector not in self.robot.end_effectors:
-            raise ValueError("自动 IK 仅用于机器人配置中定义的末端坐标系")
         result = follow_target(
             self.robot,
             self._state.draft.qpos,
             target,
-            lock_base=lock_base,
-            locked_joints=self._state.draft.locked_joints,
+            constraints=self._state.draft.constraints,
             position_step=position_step,
             rotation_step=rotation_step,
         )

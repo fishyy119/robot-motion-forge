@@ -10,7 +10,7 @@ import numpy as np
 from numpy.typing import ArrayLike
 from scipy.spatial.transform import Rotation
 
-from robot_motion_forge.robot.model import quaternion
+from robot_motion_forge.rotations import rotation_to_wxyz
 
 from ..drag import JointTarget
 
@@ -18,8 +18,10 @@ if TYPE_CHECKING:
     from viser import ClientHandle
 
     from robot_motion_forge.application.editor import Editor
+    from robot_motion_forge.motion.constraints import EditConstraints
     from robot_motion_forge.motion.draft import Draft
     from robot_motion_forge.motion.types import PoseTarget
+    from robot_motion_forge.robot.definition import ControlMode
 
     from ..drag import DragControls
     from ..notifications import Notifications
@@ -45,6 +47,7 @@ class PoseController:
         self._client: ClientHandle | None = None
         self._gesture = 0
         self._input_state: PoseState | None = None
+        self._constraint_state: EditConstraints | None = None
         self.dirty = True
 
     @property
@@ -54,21 +57,21 @@ class PoseController:
     def sync(self, draft: Draft) -> None:
         self.sync_inputs()
         r, tab = self._editor.robot, self._tab
-        self._view.update(draft.qpos, draft.locked_joints)
-        tab.sync_pose(draft.qpos, draft.locked_joints)
-        object_name = tab.selected_object
-        if object_name is not None and object_name in r.end_effectors:
+        self._view.update(draft.qpos, draft.constraints)
+        tab.sync_pose(draft.qpos, draft.constraints)
+        state = tab.state
+        object_name = state.object_name
+        if object_name is not None and object_name in r.frames and state.mode is not None:
             position, quat = r.pose(self._view.data, object_name)
             self._drag.show(
                 object_name,
                 position,
                 quat,
-                track_position=tab.track_position,
-                track_orientation=tab.track_orientation,
+                mode=state.mode,
                 target=self._goal,
             )
-            self._view.set_control_hint(f"末端坐标系 · {object_name}")
-        elif (name := tab.selected_joint) is not None and name not in draft.locked_joints:
+            self._view.set_control_hint(f"控制坐标系 · {object_name}")
+        elif (name := tab.selected_joint) is not None and name not in draft.constraints.locked_joints:
             index = r.joint_names.index(name)
             joint_position, joint_quat = r.joint_pose(self._view.data, name)
             self._drag.show_joint(
@@ -86,8 +89,10 @@ class PoseController:
 
     def sync_inputs(self) -> None:
         state = self._tab.state
-        if state != self._input_state:
+        constraints = self._editor.constraints
+        if state != self._input_state or constraints != self._constraint_state:
             self._input_state = state
+            self._constraint_state = constraints
             self._editor.finish_edit()
             self.reset_target()
 
@@ -104,22 +109,26 @@ class PoseController:
 
     def select_at(self, ray_origin: ArrayLike, ray_direction: ArrayLike) -> None:
         object_name = self._view.pick(ray_origin, ray_direction)
-        # 末端的原生点击也可能伴随场景点击，避免对同一选择重复重置拖拽目标。
+        # 坐标系的原生点击也可能伴随场景点击，避免对同一选择重复重置拖拽目标。
         if object_name is not None and object_name != self._tab.selected_object:
             self.select_object(object_name)
 
-    def lock_joint(self, name: str | None) -> None:
+    def set_joint_locked(self, name: str | None, locked: bool) -> None:
         if name is not None:
-            self._editor.lock_joint(name)
-        self.reset_target()
-
-    def unlock_joint(self, name: str | None) -> None:
-        if name is not None:
-            self._editor.unlock_joint(name)
+            self._editor.set_joint_locked(name, locked)
         self.reset_target()
 
     def unlock_all_joints(self) -> None:
         self._editor.unlock_all_joints()
+        self.reset_target()
+
+    def set_anchor(self, name: str, mode: ControlMode | None) -> None:
+        self._pause()
+        self._editor.set_anchor(name, mode)
+        self.reset_target()
+
+    def clear_fixed_parts(self) -> None:
+        self._editor.clear_fixed_parts()
         self.reset_target()
 
     def set_joint(self, name: str, value: float) -> None:
@@ -143,7 +152,7 @@ class PoseController:
             draft = self._editor.snapshot().draft
             self._editor.move_root(
                 draft.qpos[:3] if position is None else position,
-                draft.qpos[3:7] if rpy is None else quaternion(Rotation.from_euler("xyz", rpy)),
+                draft.qpos[3:7] if rpy is None else rotation_to_wxyz(Rotation.from_euler("xyz", rpy)),
             )
         finally:
             self.reset_target()
@@ -184,13 +193,13 @@ class PoseController:
             finally:
                 self.dirty = True
             return
-        if request is not None and request.end_effector == self._tab.selected_object:
+        if request is not None and request.frame == self._tab.selected_object:
             self._pause()
             self._goal = request
             self._following = True
         if self._goal is None or not self._following:
             return
-        result = self._editor.drag_target(self._goal, lock_base=self._tab.lock_base)
+        result = self._editor.drag_target(self._goal)
         self.dirty = True
         self._tab.show_drag_result(result)
         if result.reached or not result.applied:

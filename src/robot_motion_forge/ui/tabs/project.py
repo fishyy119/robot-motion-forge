@@ -1,4 +1,4 @@
-"""工程页：存储位置、文件名、保存、重新加载与浏览器导出。"""
+"""工程页：存储位置、文件名、保存与重新加载。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from viser import ClientHandle, GuiButtonGroupHandle, GuiButtonHandle
+    from viser import ClientHandle, GuiButtonGroupHandle
 
     from ..controls import Controls
 
@@ -18,7 +18,6 @@ if TYPE_CHECKING:
 class ProjectActions(Protocol):
     def save(self, filename: str) -> None: ...
     def load(self, filename: str) -> None: ...
-    def export(self, client: ClientHandle) -> None: ...
 
 
 class ProjectTab:
@@ -31,7 +30,6 @@ class ProjectTab:
             )
             self._filename = gui.add_text("文件名", initial_value=project_path.name)
             self._file_actions = gui.add_button_group("工程操作", options=("保存", "重新加载"))
-        self._export_button = gui.add_button("导出 PKL")
 
     def bind_actions(self, actions: ProjectActions) -> None:
         controls = self._controls
@@ -41,12 +39,6 @@ class ProjectTab:
             return partial(file_actions[target.value], self.filename)
 
         self._file_actions.on_click(controls.client_action(prepare_file))
-
-        def prepare_export(client: ClientHandle, _target: GuiButtonHandle) -> Callable[[], None]:
-            return partial(actions.export, client)
-
-        # 下载只发送给触发导出的客户端，生成数据仍统一在主线程执行。
-        self._export_button.on_click(controls.client_action(prepare_export))
 
     @property
     def filename(self) -> str:

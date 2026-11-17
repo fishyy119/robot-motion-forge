@@ -1,11 +1,11 @@
-"""通用末端轨迹残差：参考跟随、线/角速度与线/角加速度。"""
+"""通用坐标系轨迹残差：参考跟随、线/角速度与线/角加速度。"""
 
 from collections.abc import Sequence
 
 import numpy as np
 import pyceres
 
-from robot_motion_forge.motion.types import EndEffectorTaskMode
+from robot_motion_forge.robot.definition import ControlMode
 from robot_motion_forge.robot.model import FloatArray
 from robot_motion_forge.robot.task_frame import FrameState, TaskFrame
 
@@ -13,14 +13,12 @@ from .trajectory_costs import Jacobians, Parameters, PoseLayout, inverse_right_j
 
 
 class _FrameCost(pyceres.CostFunction):
-    def __init__(self, frame: TaskFrame, mode: EndEffectorTaskMode, count: int, weight: float) -> None:
+    def __init__(self, frame: TaskFrame, mode: ControlMode, count: int, weight: float) -> None:
         super().__init__()
         self.frame, self.count = frame, count
         self.track_position = mode in ("position", "pose")
         self.track_orientation = mode in ("orientation", "pose")
         self.size = 3 * (int(self.track_position) + int(self.track_orientation))
-        if self.size == 0:
-            raise ValueError("禁用的末端任务不应创建优化残差")
         # 位置按 1 cm、旋转按 1° 归一化；weight 是平方根权重。
         self.position_scale = weight / 0.01
         self.orientation_scale = weight / np.deg2rad(1.0)
@@ -43,8 +41,8 @@ class _FrameCost(pyceres.CostFunction):
         write_jacobians(jacobians, blocks)
 
 
-class EndEffectorReferenceCost(_FrameCost):
-    def __init__(self, frame: TaskFrame, mode: EndEffectorTaskMode, target: FrameState, weight: float) -> None:
+class FrameReferenceCost(_FrameCost):
+    def __init__(self, frame: TaskFrame, mode: ControlMode, target: FrameState, weight: float) -> None:
         super().__init__(frame, mode, 1, weight)
         self.target = target
 
@@ -74,11 +72,11 @@ class EndEffectorReferenceCost(_FrameCost):
         return True
 
 
-class EndEffectorDifferenceCost(_FrameCost):
+class FrameDifferenceCost(_FrameCost):
     def __init__(
         self,
         frame: TaskFrame,
-        mode: EndEffectorTaskMode,
+        mode: ControlMode,
         *,
         position_coefficients: Sequence[float],
         rotation_coefficients: Sequence[float],

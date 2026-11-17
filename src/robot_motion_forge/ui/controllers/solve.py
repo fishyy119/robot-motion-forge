@@ -1,4 +1,4 @@
-"""优化参数、末端任务与后台求解任务的生命周期。"""
+"""优化参数、坐标系任务、后台求解任务的生命周期与动作导出。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from threading import Event
 from typing import TYPE_CHECKING
 
-from robot_motion_forge.motion.types import EndEffectorTask
+from robot_motion_forge.io.export import serialize_motion
 from robot_motion_forge.solvers.trajectory import SolveCancelled, optimize
 
 if TYPE_CHECKING:
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
     from robot_motion_forge.application.editor import Editor
     from robot_motion_forge.motion.trajectory import Trajectory
-    from robot_motion_forge.motion.types import EndEffectorTaskMode
+    from robot_motion_forge.motion.types import FrameTask
 
     from ..notifications import Notifications, OperationNotification
     from ..tabs.solve import SolveTab
@@ -52,41 +52,21 @@ class SolveController:
         self._job: _SolveJob | None = None
         self._tab.set_busy(self._job is not None)
 
-    def set_duration(self, value: float) -> None:
-        self._update_timing(duration=value)
-
-    def set_fps(self, value: float) -> None:
-        self._update_timing(fps=value)
-
-    def _update_timing(self, *, duration: float | None = None, fps: float | None = None) -> None:
+    def set_timing(self, *, duration: float | None = None, fps: float | None = None) -> None:
         self._reset_target()
         self._editor.set_timing(duration=duration, fps=fps)
 
     def set_setting(self, name: str, value: float | int) -> None:
         self._editor.set_settings(**{name: value})
 
-    def set_foot_support(self, value: bool) -> None:
-        self._editor.set_settings(foot_support=value)
-        self._editor.finish_edit()
+    def set_frame_task(self, name: str, task: FrameTask) -> None:
+        self._editor.set_frame_task(name, task)
 
-    def set_end_effector_mode(self, name: str, value: EndEffectorTaskMode) -> None:
-        self._editor.finish_edit()
-        task = self._editor.snapshot().project.end_effector_tasks.get(name, EndEffectorTask())
-        task.mode = value
-        self._editor.set_end_effector_task(name, task)
-        self._editor.finish_edit()
-
-    def set_end_effector_reference(self, name: str, value: str | None) -> None:
-        self._editor.finish_edit()
-        task = self._editor.snapshot().project.end_effector_tasks.get(name, EndEffectorTask())
-        task.reference_body = value
-        self._editor.set_end_effector_task(name, task)
-        self._editor.finish_edit()
-
-    def set_end_effector_weight(self, name: str, value: float) -> None:
-        task = self._editor.snapshot().project.end_effector_tasks.get(name, EndEffectorTask())
-        task.weight = value
-        self._editor.set_end_effector_task(name, task)
+    def export(self, client: ClientHandle) -> None:
+        state = self._editor.snapshot()
+        payload = serialize_motion(self._editor.robot, state.project, self._editor.preview())
+        # Viser 下载流程自带接收完成通知。
+        client.send_file_download("motion.pkl", payload, save_immediately=True)
 
     def start(self) -> None:
         if self._job is not None:

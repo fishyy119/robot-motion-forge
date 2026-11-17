@@ -4,12 +4,14 @@ import math
 from typing import Annotated, Literal
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StringConstraints, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 type Name = Annotated[str, StringConstraints(min_length=1, pattern=r"\S")]
 type Number = Annotated[float, Field(strict=True, allow_inf_nan=False)]
 type Vector3 = tuple[Number, Number, Number]
 type Quaternion = tuple[Number, Number, Number, Number]
+type JointRange = tuple[Number, Number]
+type ControlMode = Literal["position", "orientation", "pose"]
 
 
 class DefinitionModel(BaseModel):
@@ -21,16 +23,29 @@ class ModelConfig(DefinitionModel):
     repository_root: Name = Field(
         description="机器人仓库根目录；支持相对本定义的路径、~ 和环境变量；工程默认保存在该目录的 .robot-motion-forge 子目录"
     )
-    model: Name = Field(description="本地纯机器人 MJCF 路径，不含地面等场景对象；支持相对本定义的路径、~ 和环境变量")
-    root_body: Name = Field(description="MuJoCo 模型中的机器人根连杆名称")
+    model: Name = Field(
+        description="本地纯机器人 MJCF 路径，不含地面等场景对象；相对机器人仓库根目录解析，也支持绝对路径、~ 和环境变量"
+    )
+    joint_limit_overrides: dict[Name, JointRange] = Field(
+        default_factory=dict,
+        description="覆盖模型关节限位，值为 [下限, 上限]；hinge 使用 rad，slide 使用 m；未列出的关节沿用模型限位",
+    )
+
+    @field_validator("joint_limit_overrides")
+    @classmethod
+    def validate_joint_limit_overrides(cls, value: dict[str, JointRange]) -> dict[str, JointRange]:
+        for name, (lower, upper) in value.items():
+            if lower >= upper:
+                raise ValueError(f"关节 {name} 的限位下限必须小于上限")
+        return value
 
 
 class HomePose(DefinitionModel):
     position: Vector3 | None = Field(
-        default=None, alias="position_m", description="初始根位置，单位 m；省略时使用模型 qpos0"
+        default=None, alias="position_m", description="torso 初始位置，单位 m；省略时使用模型 qpos0"
     )
     quaternion: Quaternion | None = Field(
-        default=None, alias="quaternion_wxyz", description="初始根方向，wxyz；读入后归一化"
+        default=None, alias="quaternion_wxyz", description="torso 初始朝向，wxyz；读入后归一化"
     )
     joints_rad: dict[Name, Number] = Field(default_factory=dict, description="hinge 关节初始角度，单位 rad")
     joints_m: dict[Name, Number] = Field(default_factory=dict, description="slide 关节初始位移，单位 m")
@@ -46,24 +61,25 @@ class HomePose(DefinitionModel):
         return value[0] / norm, value[1] / norm, value[2] / norm, value[3] / norm
 
 
-def _default_control_mode(fields: dict[str, object]) -> Literal["position", "pose"]:
-    return "pose" if fields.get("foot") else "position"
+class ControlFrame(DefinitionModel):
+    """固定在连杆上的控制坐标系；原点可偏移，坐标轴与连杆对齐。"""
 
-
-class EndEffector(DefinitionModel):
-    """固定在连杆上的末端坐标系；原点可偏移，坐标轴与连杆对齐。"""
-
-    body: Name = Field(description="末端坐标系所附着的 MuJoCo 连杆名称")
+    body: Name = Field(description="控制坐标系所附着的 MuJoCo 连杆名称")
     offset: Vector3 = Field(
-        default=(0.0, 0.0, 0.0), alias="offset_m", description="末端坐标系原点在连杆局部坐标中的位置，单位 m"
+        default=(0.0, 0.0, 0.0), alias="offset_m", description="控制坐标系原点在连杆局部坐标中的位置，单位 m"
     )
-    foot: StrictBool = Field(default=False, description="是否为足部末端")
     support_polygon_cm: list[Vector3] = Field(
-        default_factory=list[Vector3], description="足底接触轮廓顶点，末端局部坐标，单位 cm；至少三个共面且不共线的点"
+        default_factory=list[Vector3],
+        description="足底接触轮廓顶点，控制坐标系局部坐标，单位 cm；至少三个共面且不共线的点",
     )
-    control_mode: Literal["position", "orientation", "pose"] = Field(
-        default_factory=_default_control_mode,
-        description="默认交互目标：位置、朝向或完整位姿；足部默认为完整位姿，其余末端默认为位置；可在界面中切换",
+    control_mode: ControlMode = Field(
+        default="position", description="默认交互目标：位置、朝向或完整位姿；省略时为位置；可在界面中切换"
+    )
+    fixed_mode: ControlMode | None = Field(
+        default=None, description="新会话的默认固定分量：位置、朝向或完整位姿；省略时不固定"
+    )
+    trajectory_mode: ControlMode | None = Field(
+        default=None, description="新工程的默认轨迹求解分量：位置、朝向或完整位姿；省略时禁用"
     )
 
     @field_validator("support_polygon_cm")
@@ -84,7 +100,7 @@ class RobotDefinition(DefinitionModel):
     schema_url: str | None = Field(default=None, alias="$schema", description="可选的编辑器 JSON Schema 引用")
     robot: ModelConfig
     home: HomePose = Field(default_factory=HomePose)
-    end_effectors: dict[Name, EndEffector] = Field(default_factory=dict, description="逻辑名称到末端坐标系定义的映射")
+    frames: dict[Name, ControlFrame] = Field(default_factory=dict, description="逻辑名称到控制坐标系定义的映射")
     joint_groups: dict[Name, list[Name]] = Field(
         default_factory=dict, description="界面中的关节分组；每个关节只能属于一个分组"
     )
@@ -100,12 +116,12 @@ class RobotDefinition(DefinitionModel):
                 assigned.add(name)
         return value
 
-    @field_validator("end_effectors")
+    @field_validator("frames")
     @classmethod
-    def validate_end_effector_names(cls, value: dict[str, EndEffector]) -> dict[str, EndEffector]:
+    def validate_frame_names(cls, value: dict[str, ControlFrame]) -> dict[str, ControlFrame]:
         for name in value:
             if "/" in name or name.startswith("joint:"):
-                raise ValueError(f"末端名称不可包含 / 或以 joint: 开头：{name}")
+                raise ValueError(f"坐标系名称不可包含 / 或以 joint: 开头：{name}")
         return value
 
 

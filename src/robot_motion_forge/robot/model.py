@@ -1,6 +1,7 @@
 """MuJoCo 机器人适配层：运动学、流形运算与限位。没有 UI 依赖。"""
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
@@ -10,18 +11,21 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 from scipy.spatial.transform import Rotation
 
-from .definition import EndEffector, RobotDefinition
+from robot_motion_forge.rotations import rotation_to_wxyz
+
+from .definition import ControlFrame, RobotDefinition
 from .environment import Environment
 
 type FloatArray = NDArray[np.float64]
 
 
-def rotation(wxyz: ArrayLike) -> Rotation:
-    return Rotation.from_quat(np.asarray(wxyz)[..., [1, 2, 3, 0]])
+@dataclass(frozen=True)
+class SupportPolygon:
+    """机器人加载时准备的只读支撑轮廓；顶点与法线均在控制坐标系中。"""
 
-
-def quaternion(rot: Rotation) -> FloatArray:
-    return rot.as_quat()[..., [3, 0, 1, 2]]
+    site_id: int
+    vertices_m: FloatArray
+    normal: FloatArray
 
 
 class Robot:
@@ -33,32 +37,53 @@ class Robot:
         if not self.repository_root.is_dir():
             raise ValueError(f"找不到机器人仓库目录：{self.repository_root}")
         model_path = Path(os.path.expandvars(config.robot.model)).expanduser()
-        self.model_path = (self.config_path.parent / model_path).resolve()
+        self.model_path = (self.repository_root / model_path).resolve()
         if not self.model_path.is_file():
             raise ValueError(f"找不到本地模型：{self.model_path}")
         spec = mj.MjSpec.from_file(str(self.model_path))
-        self.end_effector_sites = {name: f"rmf/end_effectors/{name}" for name in config.end_effectors}
-        for name, end_effector in config.end_effectors.items():
-            body = cast(mj.MjsBody | None, spec.body(end_effector.body))
+        for name, bounds in config.robot.joint_limit_overrides.items():
+            joint = cast(mj.MjsJoint | None, spec.joint(name))
+            if joint is None:
+                raise ValueError(f"关节限位包含未知关节：{name}")
+            if joint.type not in (mj.mjtJoint.mjJNT_HINGE, mj.mjtJoint.mjJNT_SLIDE):
+                raise ValueError(f"关节限位只支持 hinge / slide 关节：{name}")
+            # 配置始终使用 SI 单位；编译前按 MJCF 的角度约定写入，同步用于机器人与环境模型。
+            values = np.asarray(bounds, dtype=float)
+            joint.range = (
+                np.rad2deg(values) if joint.type == mj.mjtJoint.mjJNT_HINGE and spec.compiler.degree else values
+            )
+            joint.limited = mj.mjtLimited.mjLIMITED_TRUE
+        site_names = {name: f"rmf/frames/{name}" for name in config.frames}
+        # 控制坐标系使用独立默认值，避免继承原模型 site 的旋转、fromto 或材质设置。
+        site_defaults = mj.MjSpec()
+        for name, frame in config.frames.items():
+            body = cast(mj.MjsBody | None, spec.body(frame.body))
             if body is None:
-                raise ValueError(f"找不到机器人连杆：{end_effector.body}")
-            # Mink 使用真实末端原点的 site 雅可比，足底偏移也参与位置任务。
-            body.add_site(name=self.end_effector_sites[name], pos=end_effector.offset, rgba=(0, 0, 0, 0))
+                raise ValueError(f"找不到机器人连杆：{frame.body}")
+            # 位姿与雅可比共用真实控制坐标系的 site，足底偏移也参与位置任务。
+            body.add_site(
+                default=site_defaults.default,
+                name=site_names[name],
+                pos=frame.offset,
+                quat=(1, 0, 0, 0),
+                rgba=(0, 0, 0, 0),
+            )
         self.model: mj.MjModel = spec.compile()
         m = self.model
-        self.root_id = self.body_id(config.robot.root_body)
+        self.frame_site_ids = {name: m.site(site).id for name, site in site_names.items()}
         roots = np.flatnonzero(m.body_parentid[1:] == 0) + 1
-        if len(roots) != 1 or roots[0] != self.root_id:
-            raise ValueError("root_body 必须指向模型唯一的顶层根连杆；请加载纯机器人 MJCF")
+        if len(roots) != 1:
+            raise ValueError("模型必须只有一个顶层根连杆；请加载纯机器人 MJCF")
+        self.root_id = int(roots[0])
         if any(np.any(ids == 0) for ids in (m.geom_bodyid, m.site_bodyid, m.cam_bodyid, m.light_bodyid)):
             raise ValueError("模型包含 world 上的几何、site、相机或灯光；请加载纯机器人 MJCF，地面由项目提供")
         self.body_ids = list(range(1, m.nbody))
         free = np.flatnonzero(m.jnt_type == mj.mjtJoint.mjJNT_FREE)
         self.floating = len(free) == 1
         if len(free) > 1 or (self.floating and (m.jnt_qposadr[free[0]] != 0 or m.jnt_bodyid[free[0]] != self.root_id)):
-            raise ValueError("当前适配器要求根部为唯一自由关节，或使用固定基座模型")
+            raise ValueError("当前适配器要求根部为唯一自由关节，或使用 torso 固定的模型")
         if np.any(m.jnt_type == mj.mjtJoint.mjJNT_BALL):
-            raise ValueError("当前适配器支持自由基座与 hinge/slide 关节；球关节需新增适配器")
+            raise ValueError("当前适配器支持 torso 自由运动与 hinge/slide 关节；球关节需新增适配器")
         if m.neq:
             raise ValueError("当前适配器支持开链机器人；闭链 / equality 约束需要专用适配器")
         if m.opt.disableflags & mj.mjtDisableBit.mjDSBL_CONTACT:
@@ -73,9 +98,16 @@ class Robot:
             [m.jnt_range[i, 0] if m.jnt_limited[i] else -np.inf for i in self.joint_ids]
         )
         self.upper: FloatArray = np.asarray([m.jnt_range[i, 1] if m.jnt_limited[i] else np.inf for i in self.joint_ids])
-        self.end_effectors = dict(config.end_effectors)
-        for end_effector in self.end_effectors.values():
-            self.body_id(end_effector.body)
+        self.frames = dict(config.frames)
+        self.support_polygons: dict[str, SupportPolygon] = {}
+        for name, frame in self.frames.items():
+            self.body_id(frame.body)
+            if frame.support_polygon_cm:
+                vertices = np.asarray(frame.support_polygon_cm, dtype=float) / 100.0
+                _, _, axes = np.linalg.svd(vertices - vertices[0, :], full_matrices=False)
+                normal = axes[-1, :].copy()
+                vertices.flags.writeable = normal.flags.writeable = False
+                self.support_polygons[name] = SupportPolygon(self.frame_site_ids[name], vertices, normal)
         for group in config.joint_groups.values():
             if set(group) - set(self.joint_names):
                 raise ValueError("joint_groups 包含模型中不存在的关节")
@@ -113,10 +145,10 @@ class Robot:
             raise ValueError(f"找不到机器人连杆：{name}")
         return index
 
-    def end_effector(self, name: str) -> EndEffector:
-        if name not in self.end_effectors:
-            raise ValueError(f"未知末端：{name}")
-        return self.end_effectors[name]
+    def frame(self, name: str) -> ControlFrame:
+        if name not in self.frames:
+            raise ValueError(f"未知控制坐标系：{name}")
+        return self.frames[name]
 
     def validate_qpos(self, qpos: ArrayLike, *, limits: bool = True) -> FloatArray:
         qpos = np.asarray(qpos, dtype=float).copy()
@@ -129,8 +161,15 @@ class Robot:
             if not np.isfinite(norm) or norm < 1e-9:
                 raise ValueError("根四元数不能为零")
             qpos[3:7] /= norm
-        if limits and (np.any(qpos[self.qadr] < self.lower - 1e-8) or np.any(qpos[self.qadr] > self.upper + 1e-8)):
-            raise ValueError("关节角度超出模型限位")
+        if limits:
+            outside = np.flatnonzero((qpos[self.qadr] < self.lower - 1e-8) | (qpos[self.qadr] > self.upper + 1e-8))
+            if len(outside):
+                index = int(outside[0])
+                unit = "m" if self.model.jnt_type[self.joint_ids[index]] == mj.mjtJoint.mjJNT_SLIDE else "rad"
+                raise ValueError(
+                    f"关节 {self.joint_names[index]} 超出有效限位：{qpos[self.qadr[index]]:.6g} {unit}，"
+                    f"范围 [{self.lower[index]:.6g}, {self.upper[index]:.6g}] {unit}"
+                )
         return qpos
 
     def forward(self, qpos: ArrayLike, data: mj.MjData | None = None) -> mj.MjData:
@@ -141,10 +180,11 @@ class Robot:
         return state
 
     def pose(self, data: mj.MjData, name: str) -> tuple[FloatArray, FloatArray]:
-        """返回同一末端坐标系的世界位置与朝向。"""
-        end_effector = self.end_effector(name)
-        body = self.body_id(end_effector.body)
-        return data.xpos[body] + data.xmat[body].reshape(3, 3) @ end_effector.offset, data.xquat[body].copy()
+        """读取控制坐标系 site 的世界位置与 wxyz 朝向，返回独立数组。"""
+        site = self.frame_site_ids[name]
+        orientation = np.empty(4)
+        mj.mju_mat2Quat(orientation, data.site_xmat[site])
+        return data.site_xpos[site].copy(), orientation
 
     def center_of_mass(self, data: mj.MjData) -> FloatArray:
         return data.subtree_com[self.root_id].copy()
@@ -178,7 +218,7 @@ class Robot:
             # 转环随当前关节转动，松开后不会跳回零角度；ref 对应模型 qpos0。
             address = m.jnt_qposadr[joint]
             frame *= Rotation.from_rotvec((0.0, 0.0, float(data.qpos[address] - m.qpos0[address])))
-        orientation = quaternion(frame)
+        orientation = rotation_to_wxyz(frame)
         position = (
             data.xpos[m.jnt_bodyid[joint]] if m.jnt_type[joint] == mj.mjtJoint.mjJNT_SLIDE else data.xanchor[joint]
         )

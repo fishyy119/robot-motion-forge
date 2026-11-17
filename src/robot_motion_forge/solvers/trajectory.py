@@ -16,7 +16,7 @@ from robot_motion_forge.robot.model import FloatArray, Robot
 from robot_motion_forge.robot.task_frame import TaskFrame
 
 from .collision import CollisionCost
-from .end_effector import EndEffectorDifferenceCost, EndEffectorReferenceCost
+from .frame import FrameDifferenceCost, FrameReferenceCost
 from .support import SupportCost
 from .trajectory_costs import LinearCost, PoseLayout, RotationDifferenceCost, RotationReferenceCost
 
@@ -47,7 +47,7 @@ class _IterationCallback(pyceres.IterationCallback):
 @dataclass
 class _PreparedTrajectory:
     times: FloatArray
-    reference: FloatArray
+    initial: FloatArray
     free: set[int]
     layout: PoseLayout
     values: list[FloatArray]
@@ -57,7 +57,7 @@ class _PreparedTrajectory:
         return [values[index] for index in indices for values in self.values]
 
     def qpos(self) -> FloatArray:
-        result = self.reference.copy()
+        result = self.initial.copy()
         for frame in self.free:
             result[frame] = self.layout.unpack(self.parameters([frame]))
         return result
@@ -73,7 +73,7 @@ class _Difference(NamedTuple):
 def _differences(
     times: FloatArray, duration: float, velocity: float, acceleration: float, *, weight_scale: float = 1.0
 ) -> Iterator[_Difference]:
-    """关节、基座与末端共用非均匀时间步及按动作时长归一化的差分权重。"""
+    """关节、torso 与坐标系共用非均匀时间步及按动作时长归一化的差分权重。"""
     dt = np.diff(times)
     if velocity > 0:
         for index, step in enumerate(dt):
@@ -93,35 +93,35 @@ def _differences(
             )
 
 
-def _add_end_effector_tasks(prepared: _PreparedTrajectory, robot: Robot, project: Project) -> None:
-    if not project.uses_end_effector_tasks:
+def _add_frame_tasks(prepared: _PreparedTrajectory, robot: Robot, project: Project) -> None:
+    if not project.uses_frame_tasks:
         return
     settings, problem, times = project.settings, prepared.problem, prepared.times
 
-    for name, task in project.end_effector_tasks.items():
-        if task.mode == "none" or task.weight <= 0:
+    for name, task in project.frame_tasks.items():
+        if task.mode is None or task.weight <= 0:
             continue
         frame = TaskFrame(robot, name, task.reference_body)
-        if settings.end_effector_reference > 0:
+        if settings.frame_reference > 0:
             targets = TaskReference(frame, project.keyframes).sample(times)
-            weight = float(np.sqrt(task.weight * settings.end_effector_reference / len(times)))
+            weight = float(np.sqrt(task.weight * settings.frame_reference / len(times)))
             for index in sorted(prepared.free):
                 problem.add_residual_block(
-                    EndEffectorReferenceCost(frame, task.mode, targets[index], weight),
+                    FrameReferenceCost(frame, task.mode, targets[index], weight),
                     None,
                     prepared.parameters([index]),
                 )
         for difference in _differences(
             times,
             project.duration,
-            settings.end_effector_velocity,
-            settings.end_effector_acceleration,
+            settings.frame_velocity,
+            settings.frame_acceleration,
             weight_scale=task.weight,
         ):
             if not prepared.free.intersection(difference.indices):
                 continue
             problem.add_residual_block(
-                EndEffectorDifferenceCost(
+                FrameDifferenceCost(
                     frame,
                     task.mode,
                     position_coefficients=difference.linear_coefficients,
@@ -138,28 +138,29 @@ def _prepare(robot: Robot, project: Project) -> _PreparedTrajectory:
     # 非帧对齐关键帧作为独立节点加入，避免约束被舍入或漏掉。
     regular = np.linspace(0, project.duration, max(2, int(np.ceil(project.duration * settings.solve_fps)) + 1))
     protected = np.unique([0.0, project.duration, *(key.time for key in project.keyframes)])
-    if project.uses_end_effector_tasks:
-        # 启用末端任务时直接约束输出帧，避免最终逐关节重采样改变末端目标；作者时间仍优先。
+    if project.uses_frame_tasks:
+        # 启用坐标系任务时直接约束输出帧，避免最终逐关节重采样改变坐标系目标；作者时间仍优先。
         output = [time for time in project.output_times() if not np.any(np.isclose(protected, time, rtol=0, atol=1e-8))]
         protected = np.sort(np.r_[protected, output])
     # 优先保留作者给出的准确时间，移除与其几乎重合的规则节点，避免极短时间步。
     extra = [time for time in regular if not np.any(np.isclose(protected, time, rtol=0, atol=1e-8))]
     times = np.sort(np.r_[protected, extra])
-    reference = project.seed(robot, times).qpos
+    # 逐关节插值只初始化优化变量，不作为整段轨迹的姿态跟随目标。
+    initial = project.keyframe_trajectory().sample(robot, times)
     count = len(times)
     key_indices = {key.id: int(np.argmin(abs(times - key.time))) for key in project.keyframes}
     fixed = {key_indices[key.id] for key in project.keyframes if key.locked}
     for key in project.keyframes:
         if key.locked:
-            reference[key_indices[key.id]] = key.qpos
+            initial[key_indices[key.id]] = key.qpos
     free = set(range(count)) - fixed
-    joints = np.ascontiguousarray(reference[:, robot.qadr])
-    positions = np.ascontiguousarray(reference[:, :3]) if robot.floating else np.zeros((count, 0))
-    quaternions = np.ascontiguousarray(reference[:, 3:7]) if robot.floating else np.zeros((count, 0))
+    joints = np.ascontiguousarray(initial[:, robot.qadr])
+    positions = np.ascontiguousarray(initial[:, :3]) if robot.floating else np.zeros((count, 0))
+    quaternions = np.ascontiguousarray(initial[:, 3:7]) if robot.floating else np.zeros((count, 0))
     # 参数数组由准备结果持有；PyCeres 问题负责保留残差和流形对象的引用。
     problem = pyceres.Problem()
     layout = PoseLayout(robot)
-    prepared = _PreparedTrajectory(times, reference, free, layout, layout.pack(joints, positions, quaternions), problem)
+    prepared = _PreparedTrajectory(times, initial, free, layout, layout.pack(joints, positions, quaternions), problem)
     quaternion_manifold = pyceres.QuaternionManifold()
     for frame in range(count):
         if robot.joint_names:
@@ -176,10 +177,13 @@ def _prepare(robot: Robot, project: Project) -> _PreparedTrajectory:
             for value in prepared.parameters([frame]):
                 problem.set_parameter_block_constant(value)
 
-    def add_reference(frame: int, weight: float, target: FloatArray) -> None:
-        if weight <= 0 or frame in fixed:
-            return
-        weight = float(np.sqrt(weight))
+    # 姿态偏好仅来自作者显式给出的未锁定关键帧，并只作用于对应时刻。
+    for key in project.keyframes:
+        frame = key_indices[key.id]
+        if settings.keyframe <= 0 or frame in fixed:
+            continue
+        weight = float(np.sqrt(settings.keyframe))
+        target = np.asarray(key.qpos)
         if robot.joint_names:
             problem.add_residual_block(
                 LinearCost(len(robot.joint_names), [weight], weight * target[robot.qadr]), None, [joints[frame]]
@@ -187,11 +191,6 @@ def _prepare(robot: Robot, project: Project) -> _PreparedTrajectory:
         if robot.floating:
             problem.add_residual_block(LinearCost(3, [weight], weight * target[:3]), None, [positions[frame]])
             problem.add_residual_block(RotationReferenceCost(target[3:7], weight), None, [quaternions[frame]])
-
-    for frame in sorted(free):
-        add_reference(frame, settings.style / count, reference[frame])
-    for key in project.keyframes:
-        add_reference(key_indices[key.id], settings.keyframe, np.asarray(key.qpos))
 
     euclidean = prepared.values[:-1] if robot.floating else prepared.values
     for difference in _differences(times, project.duration, settings.velocity, settings.acceleration):
@@ -214,9 +213,9 @@ def _prepare(robot: Robot, project: Project) -> _PreparedTrajectory:
     if settings.foot_support and (
         settings.support_position > 0 or settings.support_orientation > 0 or settings.balance > 0
     ):
-        data = robot.forward(reference[0])
+        data = robot.forward(initial[0])
         for frame in sorted(free):
-            robot.forward(reference[frame], data)
+            robot.forward(initial[frame], data)
             contacts = detect_support_contacts(foot_contacts(robot, data), nearest=True)
             problem.add_residual_block(
                 SupportCost(robot, contacts, settings, count), None, prepared.parameters([frame])
@@ -231,7 +230,7 @@ def _prepare(robot: Robot, project: Project) -> _PreparedTrajectory:
                 None,
                 prepared.parameters([frame]),
             )
-    _add_end_effector_tasks(prepared, robot, project)
+    _add_frame_tasks(prepared, robot, project)
     return prepared
 
 
@@ -249,7 +248,7 @@ def optimize(
     if cancel is not None and cancel.is_set():
         raise SolveCancelled("已取消求解")
     if not prepared.free or prepared.problem.num_residual_blocks() == 0:
-        return Trajectory(prepared.times, prepared.reference, "optimized", True, "没有可优化的自由目标")
+        return Trajectory(prepared.times, prepared.initial, "optimized", True, "没有可优化的自由目标")
     callback = _IterationCallback(cancel, progress)
     options = pyceres.SolverOptions()
     options.max_num_iterations = project.settings.max_iterations

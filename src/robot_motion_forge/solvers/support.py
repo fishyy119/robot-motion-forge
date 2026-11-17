@@ -35,23 +35,30 @@ class SupportCost(pyceres.CostFunction):
         pose = self.layout.unpack(parameters)
         robot.forward(pose, self.data)
         contacts = foot_contacts(robot, self.data, names=self.names)
-        region = build_support_region(contacts)
+        region = build_support_region(contacts) if self.balance_scale > 0 else None
         residuals[:] = 0.0
         derivative = np.zeros((self.size, robot.model.nv)) if jacobians is not None else None
         vertex_jacobians: list[FloatArray] = []
         for index, contact in enumerate(contacts):
             row = 3 * index
-            residuals[row] = self.position_scale * (np.mean(contact.vertices_m[:, 2]) - GROUND_HEIGHT_M)
-            residuals[row + 1 : row + 3] = self.orientation_scale * contact.normal[:2]
-            if derivative is not None:
+            center: FloatArray | None = np.mean(contact.vertices_m, axis=0) if self.position_scale > 0 else None
+            if center is not None:
+                residuals[row] = self.position_scale * (center[2] - GROUND_HEIGHT_M)
+            if self.orientation_scale > 0:
+                residuals[row + 1 : row + 3] = self.orientation_scale * contact.normal[:2]
+            if derivative is not None and (center is not None or self.orientation_scale > 0 or region is not None):
                 jp, jr = np.empty((3, robot.model.nv)), np.empty((3, robot.model.nv))
-                site = mj.mj_name2id(robot.model, mj.mjtObj.mjOBJ_SITE, robot.end_effector_sites[contact.name])
+                site = robot.frame_site_ids[contact.name]
                 mj.mj_jacSite(robot.model, self.data, jp, jr, site)
-                position, _ = robot.pose(self.data, contact.name)
-                vertices = np.stack([jp + np.cross(jr.T, vertex - position).T for vertex in contact.vertices_m])
-                vertex_jacobians.extend(vertices)
-                derivative[row] = self.position_scale * np.mean(vertices[:, 2], axis=0)
-                derivative[row + 1 : row + 3] = self.orientation_scale * np.cross(jr.T, contact.normal).T[:2]
+                position = self.data.site_xpos[site, :]
+                if center is not None:
+                    derivative[row] = self.position_scale * (jp[2, :] + np.cross(jr.T, center - position)[:, 2])
+                if self.orientation_scale > 0:
+                    derivative[row + 1 : row + 3] = self.orientation_scale * np.cross(jr.T, contact.normal).T[:2]
+                if region is not None:
+                    offsets = contact.vertices_m - position
+                    vertices = jp + np.cross(jr.T, offsets[:, None, :]).transpose(0, 2, 1)
+                    vertex_jacobians.extend(vertices)
         if region is not None:
             com = robot.center_of_mass(self.data)[:2]
             violations = region.normals @ com - region.bounds + self.margin_m
