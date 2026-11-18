@@ -23,7 +23,7 @@ class TaskFrame:
     def __init__(self, robot: Robot, name: str, reference_body: str | None) -> None:
         self.robot = robot
         self.site = robot.frame_site_ids[name]
-        self.reference = robot.body_id(reference_body) if reference_body is not None else None
+        self.reference = robot.frame_reference_id(name, reference_body)
         self.data = mj.MjData(robot.model)
 
     def state(self, pose: FloatArray, *, jacobian: bool = False) -> FrameState:

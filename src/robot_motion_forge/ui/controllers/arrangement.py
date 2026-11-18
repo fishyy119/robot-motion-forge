@@ -44,7 +44,7 @@ class ArrangementController:
         self._editor.update_key(key_id, time=time, name=name, locked=locked)
 
     def delete_key(self) -> None:
-        if (key_id := self._editor.snapshot().draft.selected_key) is None:
+        if (key_id := self._editor.draft_snapshot().selected_key) is None:
             raise ValueError("请先选择关键帧")
         self._pause()
         self._reset_target()

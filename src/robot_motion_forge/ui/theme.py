@@ -157,6 +157,18 @@ div:not(.mantine-Flex-root):has(> .mantine-Button-root[id]) {
     overflow-wrap: anywhere;
     user-select: text;
 }
+.rmf-curve-cursor {
+    position: absolute;
+    inset-block: 0;
+    width: 1px;
+    margin-left: -0.5px;
+    background: #b45309;
+    pointer-events: none;
+    z-index: 1;
+}
+:root[data-mantine-color-scheme="dark"] .rmf-curve-cursor {
+    background: #fbbf24;
+}
 /* 场景提示只展示对象名称；不覆盖指针事件，也不固定占用场景空间。 */
 .rmf-scene-tooltip {
     position: fixed;

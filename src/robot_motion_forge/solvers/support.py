@@ -4,10 +4,10 @@ import mujoco as mj
 import numpy as np
 import pyceres
 
-from robot_motion_forge.motion.support import FootContact, build_support_region, foot_contacts
 from robot_motion_forge.motion.types import SolverSettings
 from robot_motion_forge.robot.environment import GROUND_HEIGHT_M
 from robot_motion_forge.robot.model import FloatArray, Robot
+from robot_motion_forge.robot.support import FootContact, build_support_region, foot_contacts
 
 from .trajectory_costs import Jacobians, Parameters, PoseLayout, write_jacobians
 

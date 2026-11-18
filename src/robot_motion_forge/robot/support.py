@@ -7,8 +7,8 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.spatial import ConvexHull, QhullError
 
-from robot_motion_forge.robot.environment import GROUND_HEIGHT_M
-from robot_motion_forge.robot.model import FloatArray, Robot
+from .environment import GROUND_HEIGHT_M
+from .model import FloatArray, Robot
 
 CONTACT_POSITION_TOLERANCE_M = 0.01
 CONTACT_ROTATION_TOLERANCE_RAD = np.deg2rad(5.0)

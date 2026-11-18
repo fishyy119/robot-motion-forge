@@ -59,6 +59,7 @@
       "body": "head_link",
       "control_mode": "orientation",
       "trajectory_mode": "orientation",
+      "trajectory_reference_body": "base_link",
     },
   },
   "joint_groups": {

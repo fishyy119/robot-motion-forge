@@ -149,7 +149,7 @@ class PoseController:
     ) -> None:
         self._pause()
         try:
-            draft = self._editor.snapshot().draft
+            draft = self._editor.draft_snapshot()
             self._editor.move_root(
                 draft.qpos[:3] if position is None else position,
                 draft.qpos[3:7] if rpy is None else rotation_to_wxyz(Rotation.from_euler("xyz", rpy)),

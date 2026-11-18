@@ -2,8 +2,9 @@
 
 from .arrangement import ArrangementActions, ArrangementTab
 from .display import DisplayTab
+from .joint_curves import JointCurvesTab
 from .pose import PoseActions, PoseTab
-from .project import ProjectActions, ProjectTab
+from .project import ProjectTab
 from .solve import SolveActions, SolveTab
 from .timeline import TimelineTab
 
@@ -11,9 +12,9 @@ __all__ = [
     "ArrangementActions",
     "ArrangementTab",
     "DisplayTab",
+    "JointCurvesTab",
     "PoseActions",
     "PoseTab",
-    "ProjectActions",
     "ProjectTab",
     "SolveActions",
     "SolveTab",

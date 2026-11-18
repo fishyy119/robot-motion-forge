@@ -17,8 +17,18 @@ if TYPE_CHECKING:
     )
 
     from robot_motion_forge.robot.definition import ControlMode
+    from robot_motion_forge.robot.model import Robot
 
 CONTROL_MODES: dict[str, ControlMode] = {"位置": "position", "朝向": "orientation", "位姿": "pose"}
+
+
+def grouped_joint_names(robot: Robot) -> dict[str, list[str]]:
+    groups = {group: names.copy() for group, names in robot.config.joint_groups.items()}
+    assigned = {name for names in groups.values() for name in names}
+    remaining = [name for name in robot.joint_names if name not in assigned]
+    if remaining:
+        groups.setdefault("其他关节", []).extend(remaining)
+    return {group: names for group, names in groups.items() if names}
 
 
 class _ClientEvent[HandleT](Protocol):

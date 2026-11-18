@@ -102,6 +102,7 @@ class Robot:
         self.support_polygons: dict[str, SupportPolygon] = {}
         for name, frame in self.frames.items():
             self.body_id(frame.body)
+            self.frame_reference_id(name, frame.trajectory_reference_body)
             if frame.support_polygon_cm:
                 vertices = np.asarray(frame.support_polygon_cm, dtype=float) / 100.0
                 _, _, axes = np.linalg.svd(vertices - vertices[0, :], full_matrices=False)
@@ -150,6 +151,12 @@ class Robot:
             raise ValueError(f"未知控制坐标系：{name}")
         return self.frames[name]
 
+    def frame_reference_id(self, name: str, reference_body: str | None) -> int | None:
+        frame = self.frame(name)
+        if reference_body == frame.body:
+            raise ValueError(f"坐标系 {name} 的参考连杆不能是自身连杆")
+        return self.body_id(reference_body) if reference_body is not None else None
+
     def validate_qpos(self, qpos: ArrayLike, *, limits: bool = True) -> FloatArray:
         qpos = np.asarray(qpos, dtype=float).copy()
         if qpos.shape != (self.model.nq,):
@@ -160,7 +167,9 @@ class Robot:
             norm = np.linalg.norm(qpos[3:7])
             if not np.isfinite(norm) or norm < 1e-9:
                 raise ValueError("根四元数不能为零")
-            qpos[3:7] /= norm
+            # 已归一化的四元数保持原值，重复校验不会改变工程指纹。
+            if abs(norm - 1.0) > 1e-12:
+                qpos[3:7] /= norm
         if limits:
             outside = np.flatnonzero((qpos[self.qadr] < self.lower - 1e-8) | (qpos[self.qadr] > self.upper + 1e-8))
             if len(outside):

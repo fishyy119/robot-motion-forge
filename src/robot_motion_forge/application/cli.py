@@ -5,7 +5,6 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from robot_motion_forge.io.project import load_project
 from robot_motion_forge.robot.model import Robot
 
 from .editor import Editor
@@ -42,14 +41,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         robot = Robot.load(args.robot)
         workspace = Workspace(robot.repository_root)
         project_path = workspace.project_path(args.project) if args.project is not None else None
-        loaded = load_project(project_path, robot) if project_path is not None else None
         try:
             from robot_motion_forge.ui.app import ForgeApp
 
-            if loaded is None:
-                editor = Editor(robot)
-            else:
-                editor = Editor(robot, loaded.project, loaded.trajectory, draft=loaded.draft)
+            editor = Editor.load(robot, project_path) if project_path is not None else Editor(robot)
             app = ForgeApp(
                 editor,
                 workspace=workspace,

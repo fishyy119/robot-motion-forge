@@ -4,7 +4,7 @@ import math
 from typing import Annotated, Literal
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationInfo, field_validator
 
 type Name = Annotated[str, StringConstraints(min_length=1, pattern=r"\S")]
 type Number = Annotated[float, Field(strict=True, allow_inf_nan=False)]
@@ -64,6 +64,13 @@ class HomePose(DefinitionModel):
 class ControlFrame(DefinitionModel):
     """固定在连杆上的控制坐标系；原点可偏移，坐标轴与连杆对齐。"""
 
+    model_config = ConfigDict(
+        json_schema_extra={
+            "if": {"required": ["trajectory_reference_body"]},
+            "then": {"required": ["trajectory_mode"], "properties": {"trajectory_mode": {"type": "string"}}},
+        }
+    )
+
     body: Name = Field(description="控制坐标系所附着的 MuJoCo 连杆名称")
     offset: Vector3 = Field(
         default=(0.0, 0.0, 0.0), alias="offset_m", description="控制坐标系原点在连杆局部坐标中的位置，单位 m"
@@ -81,6 +88,18 @@ class ControlFrame(DefinitionModel):
     trajectory_mode: ControlMode | None = Field(
         default=None, description="新工程的默认轨迹求解分量：位置、朝向或完整位姿；省略时禁用"
     )
+    trajectory_reference_body: Name | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="启用 trajectory_mode 后可指定轨迹参考连杆的 MuJoCo 名称。省略或设为 null 时使用世界坐标系。",
+    )
+
+    @field_validator("trajectory_reference_body")
+    @classmethod
+    def validate_trajectory_reference(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if info.data.get("trajectory_mode") is None:
+            raise ValueError("指定 trajectory_reference_body 时必须启用 trajectory_mode")
+        return value
 
     @field_validator("support_polygon_cm")
     @classmethod

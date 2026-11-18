@@ -3,6 +3,11 @@
     "ControlFrame": {
       "additionalProperties": false,
       "description": "固定在连杆上的控制坐标系；原点可偏移，坐标轴与连杆对齐。",
+      "if": {
+        "required": [
+          "trajectory_reference_body"
+        ]
+      },
       "properties": {
         "body": {
           "$ref": "#/$defs/Name",
@@ -53,11 +58,33 @@
           ],
           "default": null,
           "description": "新工程的默认轨迹求解分量：位置、朝向或完整位姿；省略时禁用"
+        },
+        "trajectory_reference_body": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Name"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "启用 trajectory_mode 后可指定轨迹参考连杆的 MuJoCo 名称。省略或设为 null 时使用世界坐标系。"
         }
       },
       "required": [
         "body"
       ],
+      "then": {
+        "properties": {
+          "trajectory_mode": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "trajectory_mode"
+        ]
+      },
       "title": "ControlFrame",
       "type": "object"
     },

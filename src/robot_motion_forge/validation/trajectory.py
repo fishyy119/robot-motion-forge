@@ -20,8 +20,8 @@ def check_geometry(
     robot: Robot, project: Project, trajectory: Trajectory, *, check_fps: float = 120.0
 ) -> GeometryReport:
     """包含输出帧、求解节点、边界与额外密集采样；不宣称连续碰撞或动力学可行。"""
-    project = project.validated(robot)
-    validate_trajectory(robot, project, trajectory)
+    project = project.normalized(robot)
+    validate_trajectory(robot, project.duration, trajectory)
     environment = robot.environment
     uniform = np.linspace(0, project.duration, max(2, int(np.ceil(project.duration * check_fps)) + 1))
     times = np.unique(

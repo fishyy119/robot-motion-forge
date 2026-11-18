@@ -11,7 +11,7 @@ from pydantic import Field
 from robot_motion_forge.motion.constraints import EditConstraints
 from robot_motion_forge.motion.draft import Draft
 from robot_motion_forge.motion.project import Project
-from robot_motion_forge.motion.trajectory import Trajectory, validate_trajectory
+from robot_motion_forge.motion.trajectory import SolvedTrajectory, validate_trajectory
 from robot_motion_forge.motion.types import JointNames, MotionModel, Name
 from robot_motion_forge.robot.model import Robot
 
@@ -22,6 +22,7 @@ class SavedDraft(MotionModel):
     qpos: list[float]
     cursor: float = Field(ge=0)
     selected_key: Name | None
+    held_key: Name | None
     constraints: EditConstraints
 
 
@@ -29,44 +30,45 @@ class SavedSolution(MotionModel):
     fingerprint: Name
     times: list[float]
     qpos: list[list[float]]
-    source: str
+    qvel: list[list[float]]
     converged: bool
     message: str
 
 
 class ProjectFile(MotionModel):
-    schema_version: Literal[13]
+    schema_version: Literal[14]
     joint_names: JointNames
     project: Project
     draft: SavedDraft
-    solution: SavedSolution | None = None
+    # 先核对指纹，再解析求解器生成的数据。
+    solution: dict[str, object] | None = None
 
 
 class LoadedProject(NamedTuple):
     project: Project
     draft: Draft
-    trajectory: Trajectory | None
+    trajectory: SolvedTrajectory | None
 
 
 def save_project(
-    path: Path, robot: Robot, project: Project, draft: Draft, trajectory: Trajectory | None = None
+    path: Path, robot: Robot, project: Project, draft: Draft, trajectory: SolvedTrajectory | None = None
 ) -> None:
-    project = project.validated(robot)
+    project = project.normalized(robot)
     draft = deepcopy(draft)
     draft.validate(robot, project)
     saved = None
     if trajectory is not None:
-        validate_trajectory(robot, project, trajectory)
+        validate_trajectory(robot, project.duration, trajectory)
         saved = SavedSolution(
             fingerprint=project.solve_fingerprint(),
             times=trajectory.times.tolist(),
             qpos=trajectory.qpos.tolist(),
-            source=trajectory.source,
+            qvel=trajectory.qvel.tolist(),
             converged=trajectory.converged,
             message=trajectory.message,
-        )
+        ).model_dump()
     document = ProjectFile(
-        schema_version=13,
+        schema_version=14,
         joint_names=robot.joint_names.copy(),
         project=project,
         # 显式保存选中帧，保留同一时刻尚未入帧的不同草稿姿态。
@@ -74,6 +76,7 @@ def save_project(
             qpos=draft.qpos.tolist(),
             cursor=draft.cursor,
             selected_key=draft.selected_key,
+            held_key=draft.held_key,
             constraints=draft.constraints.model_copy(deep=True),
         ),
         solution=saved,
@@ -87,24 +90,26 @@ def load_project(path: Path, robot: Robot) -> LoadedProject:
     document = ProjectFile.model_validate(raw)
     if document.joint_names != robot.joint_names:
         raise ValueError("工程的有序关节列表与当前机器人不一致")
-    project = document.project.validated(robot)
+    project = document.project.normalized(robot)
     draft = Draft(
         qpos=np.asarray(document.draft.qpos, dtype=float),
         cursor=document.draft.cursor,
         selected_key=document.draft.selected_key,
+        held_key=document.draft.held_key,
         constraints=document.draft.constraints.model_copy(deep=True),
     )
     draft.validate(robot, project)
-    saved = document.solution
+    cache = document.solution
     trajectory = None
     #! 此处禁止添加过宽泛的门禁，比如具体的偏移定义等
-    if saved is not None and saved.fingerprint == project.solve_fingerprint():
-        trajectory = Trajectory(
+    if cache is not None and cache.get("fingerprint") == project.solve_fingerprint():
+        saved = SavedSolution.model_validate(cache)
+        trajectory = SolvedTrajectory(
             np.asarray(saved.times, dtype=float),
             np.asarray(saved.qpos, dtype=float),
-            saved.source,
+            np.asarray(saved.qvel, dtype=float),
             saved.converged,
             saved.message,
         )
-        validate_trajectory(robot, project, trajectory)
+        validate_trajectory(robot, project.duration, trajectory)
     return LoadedProject(project=project, draft=draft, trajectory=trajectory)

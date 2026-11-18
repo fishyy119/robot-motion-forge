@@ -6,7 +6,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from robot_motion_forge.application.editor import Editor
+    from robot_motion_forge.application.editor import Editor, PoseSource
 
     from ..tabs.timeline import TimelineTab
 
@@ -23,8 +23,7 @@ class PlaybackController:
         self._playing = not self._playing
         if self._playing:
             self._editor.select_key(None)
-            state = self._editor.snapshot()
-            if state.draft.cursor >= state.project.duration:
+            if self._editor.draft_snapshot().cursor >= self._editor.duration:
                 self._editor.seek(0.0)
         self._reset_target()
 
@@ -33,7 +32,12 @@ class PlaybackController:
         self._editor.scrub(time, snap_tolerance=self._tab.snap_tolerance)
         self._reset_target()
 
+    def set_source(self, source: PoseSource) -> None:
+        self.pause()
+        self._editor.set_pose_source(source)
+        self._reset_target()
+
     def tick(self, elapsed: float) -> None:
         if self._playing:
-            self._editor.advance(elapsed)
+            self._playing = self._editor.advance(elapsed)
             self._reset_target()

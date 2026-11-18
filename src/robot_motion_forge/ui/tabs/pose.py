@@ -13,7 +13,7 @@ from robot_motion_forge.robot.definition import ControlMode
 from robot_motion_forge.robot.model import FloatArray, Robot
 from robot_motion_forge.rotations import rotation_from_wxyz
 
-from ..controls import CONTROL_MODES
+from ..controls import CONTROL_MODES, grouped_joint_names
 
 if TYPE_CHECKING:
     from viser import ClientHandle, GuiCheckboxHandle, GuiDropdownHandle, GuiNumberHandle, GuiSliderHandle
@@ -86,14 +86,7 @@ class PoseTab:
                 with gui.add_folder("torso", expand_by_default=False):
                     self._root_position = gui.add_vector3("位置 / m", initial_value=tuple(qpos[:3]), step=0.001)
                     self._root_rpy = gui.add_vector3("RPY / rad", initial_value=(0, 0, 0), step=0.01)
-            groups = {group: names.copy() for group, names in robot.config.joint_groups.items()}
-            assigned = {name for names in groups.values() for name in names}
-            remaining = [name for name in robot.joint_names if name not in assigned]
-            if remaining:
-                groups.setdefault("其他关节", []).extend(remaining)
-            for group, names in groups.items():
-                if not names:
-                    continue
+            for group, names in grouped_joint_names(robot).items():
                 with gui.add_folder(group, expand_by_default=False):
                     for name in names:
                         i = robot.joint_names.index(name)

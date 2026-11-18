@@ -6,7 +6,7 @@ from collections.abc import Callable
 from functools import partial
 from typing import TYPE_CHECKING, NamedTuple, Protocol
 
-from robot_motion_forge.motion.types import FrameTask
+from robot_motion_forge.motion.types import FrameTask, TerminalCondition
 from robot_motion_forge.robot.definition import ControlMode
 
 from ..controls import CONTROL_MODES
@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 _SUPPORT_FIELDS = ("support_position", "support_orientation", "balance", "support_margin_cm")
 _FRAME_FIELDS = ("frame_reference", "frame_velocity", "frame_acceleration")
 _TASK_MODES: dict[str, ControlMode | None] = {"禁用": None, **CONTROL_MODES}
+_TERMINAL_LABELS: dict[TerminalCondition, str] = {"rest": "静止", "loop": "循环"}
 
 
 class _SliderConfig(NamedTuple):
@@ -44,7 +45,7 @@ class SolveActions(Protocol):
     def export(self, client: ClientHandle) -> None: ...
     def set_timing(self, *, duration: float | None = None, fps: float | None = None) -> None: ...
     def set_frame_task(self, name: str, task: FrameTask) -> None: ...
-    def set_setting(self, name: str, value: float | int) -> None: ...
+    def set_setting(self, name: str, value: float | int | str) -> None: ...
 
 
 class SolveTab:
@@ -58,7 +59,12 @@ class SolveTab:
         with gui.add_folder("轨迹优化"):
             self._solve_button = controls.button("优化整段轨迹", primary=True)
             self._cancel_button = controls.button("取消求解")
-            self._export_button = controls.button("导出 PKL")
+            self._export_button = controls.button("导出求解 PKL", disabled=True)
+            self._terminal_condition = gui.add_dropdown(
+                "终端条件",
+                options=tuple(_TERMINAL_LABELS.values()),
+                initial_value=_TERMINAL_LABELS[project.settings.terminal_condition],
+            )
             self._foot_support = gui.add_checkbox("考虑足部支撑", initial_value=project.settings.foot_support)
             self._setting_inputs: dict[str, GuiSliderHandle[float | int]] = {}
             # 拖动步长与小数输入精度分开设置，保留手动输入的精确值。
@@ -95,14 +101,17 @@ class SolveTab:
                 )
                 handle.precision = max(handle.precision, config.precision)
                 self._setting_inputs[field] = handle
-        self._reference_bodies: dict[str, str | None] = {"世界": None}
-        self._reference_bodies.update(
-            {f"连杆 · {name}": name for body in robot.body_ids if (name := robot.model.body(body).name)}
-        )
+        self._reference_labels: dict[str | None, str] = {None: "世界"}
+        for body_id in robot.body_ids:
+            if body_name := robot.model.body(body_id).name:
+                self._reference_labels[body_name] = "基座" if body_id == robot.root_id else f"连杆 · {body_name}"
+        self._task_defaults = {
+            name: FrameTask(reference_body=frame.trajectory_reference_body) for name, frame in robot.frames.items()
+        }
         self._task_inputs: dict[str, _TaskInputs] = {}
         with gui.add_folder("坐标系轨迹", expand_by_default=False):
             for name, frame in robot.frames.items():
-                task = project.frame_tasks.get(name, FrameTask())
+                task = project.frame_tasks.get(name, self._task_defaults[name])
                 with gui.add_folder(name, expand_by_default=False):
                     mode = gui.add_dropdown(
                         "模式",
@@ -111,10 +120,8 @@ class SolveTab:
                     )
                     reference = gui.add_dropdown(
                         "参考坐标系",
-                        options=tuple(label for label, body in self._reference_bodies.items() if body != frame.body),
-                        initial_value=next(
-                            label for label, body in self._reference_bodies.items() if body == task.reference_body
-                        ),
+                        options=tuple(label for body, label in self._reference_labels.items() if body != frame.body),
+                        initial_value=self._reference_labels[task.reference_body],
                         visible=task.mode is not None,
                     )
                     weight = gui.add_slider(
@@ -133,6 +140,12 @@ class SolveTab:
         controls = self._controls
         controls.input(self._duration, lambda value: actions.set_timing(duration=value))
         controls.input(self._fps, lambda value: actions.set_timing(fps=value))
+        controls.input(
+            self._terminal_condition,
+            lambda label: actions.set_setting(
+                "terminal_condition", next(condition for condition, text in _TERMINAL_LABELS.items() if text == label)
+            ),
+        )
         controls.input(self._foot_support, lambda value: actions.set_setting("foot_support", value))
         controls.click(self._solve_button, actions.start)
         controls.click(self._cancel_button, actions.cancel)
@@ -146,12 +159,14 @@ class SolveTab:
         for field, handle in self._setting_inputs.items():
             controls.input(handle, lambda value, field=field: actions.set_setting(field, value))
 
+        reference_bodies = {label: body for body, label in self._reference_labels.items()}
+
         def prepare_task(name: str, _client: ClientHandle, _target: object) -> Callable[[], None]:
             inputs = self._task_inputs[name]
             # 入队前保存同一任务的全部字段；编辑器统一提交并处理撤销合并。
             task = FrameTask(
                 mode=_TASK_MODES[inputs.mode.value],
-                reference_body=self._reference_bodies[inputs.reference.value],
+                reference_body=reference_bodies[inputs.reference.value],
                 weight=inputs.weight.value,
             )
             return partial(actions.set_frame_task, name, task)
@@ -162,6 +177,7 @@ class SolveTab:
 
     def refresh(self, project: Project) -> None:
         self._duration.value, self._fps.value = project.duration, project.fps
+        self._terminal_condition.value = _TERMINAL_LABELS[project.settings.terminal_condition]
         self._foot_support.value = project.settings.foot_support
         tasks_enabled = any(task.mode is not None for task in project.frame_tasks.values())
         for name, handle in self._setting_inputs.items():
@@ -173,14 +189,13 @@ class SolveTab:
             elif name in _FRAME_FIELDS:
                 handle.visible = tasks_enabled
         for name, inputs in self._task_inputs.items():
-            task = project.frame_tasks.get(name, FrameTask())
+            task = project.frame_tasks.get(name, self._task_defaults[name])
             inputs.mode.value = next(label for label, value in _TASK_MODES.items() if value == task.mode)
-            inputs.reference.value = next(
-                label for label, body in self._reference_bodies.items() if body == task.reference_body
-            )
+            inputs.reference.value = self._reference_labels[task.reference_body]
             self._controls.sync_slider(inputs.weight, task.weight)
             inputs.reference.visible = inputs.weight.visible = task.mode is not None
 
-    def set_busy(self, busy: bool) -> None:
+    def set_actions(self, *, busy: bool, solved: bool) -> None:
         self._solve_button.disabled = busy
         self._cancel_button.disabled = not busy
+        self._export_button.disabled = not solved

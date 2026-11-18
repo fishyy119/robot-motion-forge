@@ -11,14 +11,14 @@ import numpy as np
 from numpy.typing import ArrayLike
 from viser import _messages
 
-from robot_motion_forge.motion.support import (
+from robot_motion_forge.robot.environment import GROUND_HEIGHT_M
+from robot_motion_forge.robot.model import Robot
+from robot_motion_forge.robot.support import (
     BALANCE_TOLERANCE_M,
     build_support_region,
     detect_support_contacts,
     foot_contacts,
 )
-from robot_motion_forge.robot.environment import GROUND_HEIGHT_M
-from robot_motion_forge.robot.model import Robot
 
 from .geometry import add_geom
 from .theme import accent_color, locked_color, robot_color, warning_color

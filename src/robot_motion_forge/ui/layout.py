@@ -1,11 +1,11 @@
-"""侧栏布局：组装编排、姿态、求解与工程页。"""
+"""编辑器侧栏与底部浮动面板布局。"""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ..tabs import ArrangementTab, PoseTab, ProjectTab, SolveTab
-from ..theme import THEME_STYLE
+from .tabs import ArrangementTab, DisplayTab, JointCurvesTab, PoseTab, ProjectTab, SolveTab, TimelineTab
+from .theme import THEME_STYLE
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from robot_motion_forge.motion.project import Project
     from robot_motion_forge.robot.model import FloatArray, Robot
 
-    from ..controls import Controls
+    from .controls import Controls
 
 
 class Sidebar:
@@ -39,5 +39,22 @@ class Sidebar:
             self.pose = PoseTab(controls, robot=robot, qpos=qpos)
         with tabs.add_tab("求解"):
             self.solve = SolveTab(controls, robot=robot, project=project)
+        with tabs.add_tab("关节曲线"):
+            self.joint_curves = JointCurvesTab(controls, robot=robot)
         with tabs.add_tab("工程"):
             self.project = ProjectTab(controls, project_path=project_path)
+
+
+class PlaybackPanel:
+    def __init__(
+        self,
+        controls: Controls,
+        *,
+        project: Project,
+        cursor: float,
+    ) -> None:
+        panel = controls.gui.add_panel()
+        self.timeline = TimelineTab(controls, tab=panel.add_tab("时间轴"), project=project, cursor=cursor)
+        with panel.add_tab("显示"):
+            self.display = DisplayTab(controls)
+        panel.float(x=16, y=-16, width=1200)

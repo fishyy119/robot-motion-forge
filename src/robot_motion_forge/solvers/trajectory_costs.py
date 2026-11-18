@@ -1,12 +1,19 @@
-"""PyCeres 的 Python 残差及解析雅可比，支持非均匀时间步与 SO(3)。"""
+"""PyCeres 的 Python 残差及解析雅可比，支持欧氏空间与 SO(3)。"""
+
+from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pyceres
 
 from robot_motion_forge.robot.model import FloatArray, Robot
-from robot_motion_forge.rotations import rotation_from_wxyz
+from robot_motion_forge.rotations import inverse_right_jacobian, rotation_from_wxyz, skew
+
+if TYPE_CHECKING:
+    from robot_motion_forge.robot.definition import ControlMode
+    from robot_motion_forge.robot.task_frame import FrameState, TaskFrame
 
 type Parameters = Sequence[FloatArray]
 
@@ -14,28 +21,10 @@ type Parameters = Sequence[FloatArray]
 type Jacobians = Sequence[FloatArray | None] | None
 
 
-def _skew(vector: FloatArray) -> FloatArray:
-    x, y, z = vector
-    return np.array([[0, -z, y], [z, 0, -x], [-y, x, 0]], dtype=float)
-
-
-def inverse_right_jacobian(vector: FloatArray) -> FloatArray:
-    angle2 = float(vector @ vector)
-    cross = _skew(vector)
-    # J_r^{-1}(v) = I + [v]/2 + (1 - theta/2*cot(theta/2))/theta^2 * [v]^2。
-    # Log(SO3) 的角度在 [0, pi]；零附近用级数避免相消。
-    coefficient = (
-        1 / 12 + angle2 / 720 + angle2**2 / 30240
-        if angle2 < 1e-8
-        else (1 - np.sqrt(angle2) / (2 * np.tan(np.sqrt(angle2) / 2))) / angle2
-    )
-    return np.eye(3) + 0.5 * cross + coefficient * (cross @ cross)
-
-
 def quaternion_lift(value: FloatArray) -> FloatArray:
     # 单位 wxyz 四元数：dq = 1/2 * [-v^T; wI + [v]] dtheta（右增量）。
     # 这里返回其切空间伪逆；Ceres 再乘自己的流形 PlusJacobian。
-    return 2 * np.column_stack((-value[1:], value[0] * np.eye(3) - _skew(value[1:])))
+    return 2 * np.column_stack((-value[1:], value[0] * np.eye(3) - skew(value[1:])))
 
 
 def write_jacobians(jacobians: Jacobians, blocks: Sequence[FloatArray]) -> None:
@@ -53,10 +42,10 @@ class PoseLayout:
         self.robot = robot
         self.sizes = ([len(robot.joint_names)] if robot.joint_names else []) + ([3, 4] if robot.floating else [])
 
-    def pack(self, joints: FloatArray, positions: FloatArray, quaternions: FloatArray) -> list[FloatArray]:
-        blocks = [joints] if self.robot.joint_names else []
+    def pack(self, pose: FloatArray) -> list[FloatArray]:
+        blocks = [pose[self.robot.qadr]] if self.robot.joint_names else []
         if self.robot.floating:
-            blocks.extend([positions, quaternions])
+            blocks.extend([pose[:3].copy(), pose[3:7].copy()])
         return blocks
 
     def unpack(self, parameters: Parameters) -> FloatArray:
@@ -80,22 +69,20 @@ class PoseLayout:
         return blocks
 
 
-class LinearCost(pyceres.CostFunction):
-    """用线性组合表达参考值、速度和非均匀时间步的加速度残差。"""
+class LinearReferenceCost(pyceres.CostFunction):
+    """欧氏空间的参考残差。"""
 
-    def __init__(self, size: int, coefficients: Sequence[float], target: FloatArray | None = None) -> None:
+    def __init__(self, target: FloatArray, weight: float) -> None:
         super().__init__()
+        size = len(target)
         self.set_num_residuals(size)
-        self.set_parameter_block_sizes([size] * len(coefficients))
-        self.coefficients = tuple(coefficients)
-        self.target = np.zeros(size) if target is None else target.copy()
-        self.derivatives = tuple(coefficient * np.eye(size) for coefficient in coefficients)
+        self.set_parameter_block_sizes([size])
+        self.target, self.weight = target.copy(), weight
+        self.derivative = weight * np.eye(size)
 
     def Evaluate(self, parameters: Parameters, residuals: FloatArray, jacobians: Jacobians) -> bool:
-        residuals[:] = -self.target
-        for coefficient, value in zip(self.coefficients, parameters, strict=True):
-            residuals[:] += coefficient * value
-        write_jacobians(jacobians, self.derivatives)
+        residuals[:] = self.weight * (parameters[0] - self.target)
+        write_jacobians(jacobians, [self.derivative])
         return True
 
 
@@ -117,26 +104,41 @@ class RotationReferenceCost(pyceres.CostFunction):
         return True
 
 
-class RotationDifferenceCost(pyceres.CostFunction):
-    """用相邻旋转对数的线性组合表达角速度和角加速度残差。"""
-
-    def __init__(self, coefficients: Sequence[float]) -> None:
+class FrameReferenceCost(pyceres.CostFunction):
+    def __init__(self, frame: TaskFrame, mode: ControlMode, target: FrameState, weight: float) -> None:
         super().__init__()
-        self.set_num_residuals(3)
-        self.set_parameter_block_sizes([4] * (len(coefficients) + 1))
-        self.coefficients = tuple(coefficients)
+        self.frame, self.target = frame, target
+        self.track_position = mode in ("position", "pose")
+        self.track_orientation = mode in ("orientation", "pose")
+        self.size = 3 * (int(self.track_position) + int(self.track_orientation))
+        # 位置按 1 cm、旋转按 1° 归一化；weight 是平方根权重。
+        self.position_scale = weight / 0.01
+        self.orientation_scale = weight / np.deg2rad(1.0)
+        self.layout = PoseLayout(frame.robot)
+        self.set_num_residuals(self.size)
+        self.set_parameter_block_sizes(self.layout.sizes)
 
     def Evaluate(self, parameters: Parameters, residuals: FloatArray, jacobians: Jacobians) -> bool:
-        orientations = rotation_from_wxyz(np.asarray(parameters))
-        errors = (orientations[:-1].inv() * orientations[1:]).as_rotvec()
-        residuals[:] = np.asarray(self.coefficients) @ errors
-        if jacobians is not None:
-            derivatives = [np.zeros((3, 3)) for _ in parameters]
-            for index, (coefficient, error) in enumerate(zip(self.coefficients, errors, strict=True)):
-                derivatives[index] -= coefficient * inverse_right_jacobian(-error)
-                derivatives[index + 1] += coefficient * inverse_right_jacobian(error)
-            write_jacobians(
-                jacobians,
-                [block @ quaternion_lift(value) for block, value in zip(derivatives, parameters, strict=True)],
-            )
+        state = self.frame.state(self.layout.unpack(parameters), jacobian=jacobians is not None)
+        derivative = np.zeros((self.size, self.frame.robot.model.nv)) if jacobians is not None else None
+        row = 0
+        if self.track_position:
+            residuals[:3] = self.position_scale * (state.position - self.target.position)
+            if derivative is not None:
+                assert state.jacobian is not None
+                derivative[:3] = self.position_scale * state.jacobian[:3]
+            row = 3
+        if self.track_orientation:
+            error = (self.target.orientation.inv() * state.orientation).as_rotvec()
+            residuals[row : row + 3] = self.orientation_scale * error
+            if derivative is not None:
+                assert state.jacobian is not None
+                derivative[row : row + 3] = (
+                    self.orientation_scale
+                    * inverse_right_jacobian(error)
+                    @ state.orientation.as_matrix().T
+                    @ state.jacobian[3:]
+                )
+        if derivative is not None:
+            write_jacobians(jacobians, self.layout.jacobian_blocks(derivative, parameters))
         return True

@@ -24,8 +24,8 @@ class MotionPayload(TypedDict, closed=True):
 
 
 def motion_payload(robot: Robot, project: Project, trajectory: Trajectory) -> MotionPayload:
-    project = project.validated(robot)
-    validate_trajectory(robot, project, trajectory)
+    project = project.normalized(robot)
+    validate_trajectory(robot, project.duration, trajectory)
     times = project.output_times()
     qpos = trajectory.sample(robot, times)
     data = mj.MjData(robot.model)

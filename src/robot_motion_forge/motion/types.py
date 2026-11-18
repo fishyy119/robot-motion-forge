@@ -1,7 +1,7 @@
 """关键帧、位姿目标和求解参数的数据定义。"""
 
 from dataclasses import dataclass
-from typing import Annotated, cast
+from typing import Annotated, Literal, cast
 from uuid import uuid4
 
 import numpy as np
@@ -12,6 +12,7 @@ from robot_motion_forge.robot.model import Robot
 
 type Name = Annotated[str, StringConstraints(min_length=1, pattern=r"\S")]
 type Weight = Annotated[float, Field(ge=0)]
+type TerminalCondition = Literal["rest", "loop"]
 
 
 def _unique_joint_names(names: list[str]) -> list[str]:
@@ -65,11 +66,12 @@ class Keyframe(MotionModel):
 
 class FrameTask(MotionModel):
     mode: ControlMode | None = None
-    reference_body: Name | None = None
+    reference_body: Name | None
     weight: Weight = 1.0
 
 
 class SolverSettings(MotionModel):
+    terminal_condition: TerminalCondition = "rest"
     velocity: Weight = 0.002
     acceleration: Weight = 0.002
     keyframe: Weight = 200.0

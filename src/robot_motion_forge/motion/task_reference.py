@@ -2,29 +2,31 @@
 
 import numpy as np
 from scipy.interpolate import PchipInterpolator
-from scipy.spatial.transform import RotationSpline
+from scipy.spatial.transform import Rotation
 
 from robot_motion_forge.robot.model import FloatArray
 from robot_motion_forge.robot.task_frame import FrameState, TaskFrame
-from robot_motion_forge.rotations import rotation_from_wxyz, rotation_to_wxyz
 
-from .types import Keyframe
+from .rotation_curve import RotationBezier
+from .trajectory import ReferenceTrajectory
 
 
 class TaskReference:
-    def __init__(self, frame: TaskFrame, keyframes: list[Keyframe]) -> None:
-        keys = sorted(keyframes, key=lambda key: key.time)
-        self.times = np.asarray([key.time for key in keys])
-        states = [frame.state(np.asarray(key.qpos)) for key in keys]
-        self.positions = np.asarray([state.position for state in states])
-        self.orientations = rotation_from_wxyz(np.asarray([rotation_to_wxyz(state.orientation) for state in states]))
-        self.position_curve = PchipInterpolator(self.times, self.positions, axis=0) if len(keys) > 1 else None
-        self.rotation_curve = RotationSpline(self.times, self.orientations) if len(keys) > 1 else None
+    def __init__(self, frame: TaskFrame, keyframes: ReferenceTrajectory) -> None:
+        self.times = keyframes.times
+        times, poses = keyframes.interpolation_knots
+        states = [frame.state(pose) for pose in poses]
+        self._first = states[0]
+        self._curves = None
+        if len(times) > 1:
+            positions = np.stack([state.position for state in states])
+            orientations = Rotation.concatenate([state.orientation for state in states])
+            self._curves = PchipInterpolator(times, positions, axis=0), RotationBezier(times, orientations)
 
     def sample(self, times: FloatArray) -> list[FrameState]:
         query = np.clip(times, self.times[0], self.times[-1])
-        if self.position_curve is None or self.rotation_curve is None:
-            return [FrameState(self.positions[0].copy(), self.orientations[0]) for _ in query]
-        positions = self.position_curve(query)
-        orientations = self.rotation_curve(query)
+        if self._curves is None:
+            return [FrameState(self._first.position.copy(), self._first.orientation) for _ in query]
+        position_curve, rotation_curve = self._curves
+        positions, orientations = position_curve(query), rotation_curve(query)
         return [FrameState(positions[index], orientations[index]) for index in range(len(query))]

@@ -17,10 +17,10 @@ from .controllers import (
     ArrangementController,
     PlaybackController,
     PoseController,
-    ProjectController,
     SolveController,
 )
-from .panels import PlaybackPanel, Sidebar
+from .layout import PlaybackPanel, Sidebar
+from .tabs.joint_curves import configure_joint_curves
 from .theme import apply_theme
 from .viewer import RobotView, configure_scene
 
@@ -52,6 +52,7 @@ class ForgeApp:
         project_path = workspace.project_path(project_name)
         self.server = viser.ViserServer(host=host, port=port)
         configure_scene(self.server)
+        configure_joint_curves(self.server)
         self.editor = editor
         # 客户端随操作入队，操作通知发给触发操作的浏览器。
         self._events: Queue[_QueuedAction] = Queue()
@@ -98,7 +99,6 @@ class ForgeApp:
         self._epoch += 1
         e, gui = self.editor, self.server.gui
         self._display_revision = -1
-        self._display_project_revision = -1
         self._display_state: DisplayState | None = None
         epoch = self._epoch
 
@@ -106,11 +106,11 @@ class ForgeApp:
             self._events.put(_QueuedAction(epoch=epoch, action=action, client=client))
 
         controls = Controls(gui, enqueue)
-        state = e.snapshot()
-        self.sidebar = Sidebar(
-            controls, robot=e.robot, project=state.project, qpos=state.draft.qpos, project_path=project_path
-        )
-        self.playback_panel = PlaybackPanel(controls, project=state.project, cursor=state.draft.cursor)
+        project, draft = e.project_snapshot(), e.draft_snapshot()
+        self._display_project = project
+        self._display_project_revision = e.project_revision
+        self.sidebar = Sidebar(controls, robot=e.robot, project=project, qpos=draft.qpos, project_path=project_path)
+        self.playback_panel = PlaybackPanel(controls, project=project, cursor=draft.cursor)
         self.playback = PlaybackController(
             e, self.playback_panel.timeline, reset_target=lambda: self.pose.reset_target()
         )
@@ -138,9 +138,8 @@ class ForgeApp:
             reset_target=self.pose.reset_target,
             on_solution=self._solution_installed,
         )
-        self.project = ProjectController(
+        self.sidebar.project.bind_actions(
             e,
-            self.sidebar.project,
             workspace=self._workspace,
             replace_project=self._replace_project,
             notifications=self._notifications,
@@ -152,8 +151,9 @@ class ForgeApp:
         self.sidebar.arrangement.bind_actions(self.arrangement)
         self.sidebar.pose.bind_actions(self.pose)
         self.sidebar.solve.bind_actions(self.solve)
-        self.sidebar.project.bind_actions(self.project)
-        self.playback_panel.timeline.bind_actions(seek=self.playback.seek, toggle_play=self.playback.toggle)
+        self.playback_panel.timeline.bind_actions(
+            seek=self.playback.seek, set_source=self.playback.set_source, toggle_play=self.playback.toggle
+        )
         self.playback_panel.display.bind_actions(
             change_theme=self._change_theme,
             refresh=self._refresh,
@@ -191,15 +191,18 @@ class ForgeApp:
             and self._display_state == display
         ):
             return
-        state = e.snapshot()
-        project, draft = state.project, state.draft
+        project_changed = self._display_project_revision != e.project_revision
+        if project_changed:
+            self._display_project = e.project_snapshot()
+        project, draft = self._display_project, e.draft_snapshot()
         with self.server.atomic():
-            if force or self._display_project_revision != e.project_revision:
+            if force or project_changed:
                 self.playback_panel.timeline.refresh(project, draft.cursor)
                 self.sidebar.arrangement.refresh(project, selected_key=draft.selected_key, cursor=draft.cursor)
                 self.sidebar.solve.refresh(project)
             else:
                 self.sidebar.arrangement.sync_key(project, selected_key=draft.selected_key, cursor=draft.cursor)
+            self.sidebar.joint_curves.refresh(e.trajectory, draft.cursor)
             self.playback_panel.timeline.sync_cursor(draft.cursor)
             self.pose.sync(draft)
             if self._display_state is None or self._display_state.collisions != display.collisions:
@@ -215,8 +218,8 @@ class ForgeApp:
 
     def _solution_installed(self, refresh_pose: bool) -> None:
         # 后台结果只刷新未被用户改动的草稿，避免覆盖求解期间的姿态编辑或时间定位。
-        if refresh_pose and not self.pose.has_target:
-            self.editor.seek(self.editor.snapshot().draft.cursor)
+        if refresh_pose and self.editor.pose_source == "trajectory" and not self.pose.has_target:
+            self.editor.scrub(self.editor.draft_snapshot().cursor)
             self.pose.reset_target()
         self._refresh()
 
