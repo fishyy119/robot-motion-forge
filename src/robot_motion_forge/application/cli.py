@@ -5,11 +5,6 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from robot_motion_forge.robot.model import Robot
-
-from .editor import Editor
-from .workspace import Workspace
-
 DEFAULT_ROBOT_CONFIG = Path("configs/robots/robot.json")
 
 
@@ -36,28 +31,33 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    # 帮助与参数校验在加载应用依赖前完成。
     args = _parser().parse_args(argv, namespace=CLIArgs())
+
+    from robot_motion_forge.robot.model import Robot
+
+    from .editor import Editor
+    from .workspace import Workspace
+
     try:
         robot = Robot.load(args.robot)
         workspace = Workspace(robot.repository_root)
         project_path = workspace.project_path(args.project) if args.project is not None else None
-        try:
-            from robot_motion_forge.ui.app import ForgeApp
-
-            editor = Editor.load(robot, project_path) if project_path is not None else Editor(robot)
-            app = ForgeApp(
-                editor,
-                workspace=workspace,
-                host=args.host,
-                port=args.port,
-                project_name=args.project,
-            )
-        except ModuleNotFoundError as exc:
-            raise ValueError(f"缺少界面依赖 {exc.name}；请在 mujoco-py12 中运行 python -m pip install -e .") from exc
-        app.run()
-    except (ValueError, OSError, KeyError, TypeError, StopIteration) as exc:
+        editor = Editor.load(robot, project_path) if project_path is not None else Editor(robot)
+    except (ValueError, OSError) as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 1
+
+    from robot_motion_forge.ui.app import ForgeApp
+
+    app = ForgeApp(
+        editor,
+        workspace=workspace,
+        host=args.host,
+        port=args.port,
+        project_name=args.project,
+    )
+    app.run()
     return 0
 
 

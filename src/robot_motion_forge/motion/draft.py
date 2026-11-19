@@ -1,7 +1,7 @@
 """会话草稿：当前姿态、播放位置、选中帧与姿态编辑约束。"""
 
 from dataclasses import dataclass, field
-from typing import Self
+from typing import Literal, Self
 
 import numpy as np
 
@@ -9,6 +9,8 @@ from robot_motion_forge.robot.model import FloatArray, Robot
 
 from .constraints import EditConstraints
 from .project import Project
+
+type PoseSource = Literal["previous_keyframe", "trajectory"]
 
 
 @dataclass
@@ -19,6 +21,7 @@ class Draft:
     constraints: EditConstraints = field(default_factory=EditConstraints)
     # 手动定位时草稿沿用的关键帧。同一区间内改时间时保留姿态和固定锚点。
     held_key: str | None = None
+    pose_source: PoseSource = "previous_keyframe"
 
     @classmethod
     def initial(cls, robot: Robot) -> Self:
@@ -41,10 +44,11 @@ class Draft:
             and (name := self.constraints.violated_anchor(robot, robot.forward(self.qpos))) is not None
         ):
             raise ValueError(f"姿态超出部位固定容差：{name}")
-        key_ids = {key.id for key in project.keyframes}
-        if self.selected_key is not None and self.selected_key not in key_ids:
+        if self.selected_key is not None and not any(key.id == self.selected_key for key in project.keyframes):
             raise ValueError("选中帧必须是工程中的关键帧")
-        if self.held_key is not None and self.held_key not in key_ids:
+        if self.held_key is not None and self.held_key != self.selected_key and not any(
+            key.id == self.held_key for key in project.keyframes
+        ):
             raise ValueError("草稿沿用的关键帧必须存在于工程中")
 
     def matches(self, other: "Draft") -> bool:
@@ -53,5 +57,6 @@ class Draft:
             and self.cursor == other.cursor
             and self.selected_key == other.selected_key
             and self.held_key == other.held_key
+            and self.pose_source == other.pose_source
             and self.constraints == other.constraints
         )

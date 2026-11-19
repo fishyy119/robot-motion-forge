@@ -43,6 +43,7 @@ class Sidebar:
             self.joint_curves = JointCurvesTab(controls, robot=robot)
         with tabs.add_tab("工程"):
             self.project = ProjectTab(controls, project_path=project_path)
+        gui.add_html(self.pose.frame_menu_metadata())
 
 
 class PlaybackPanel:

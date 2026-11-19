@@ -53,6 +53,10 @@ class _SolveNode:
     velocity_mapping: KnotVelocity
     velocity: FloatArray
 
+    @property
+    def fixed(self) -> bool:
+        return self.locked and self.velocity_mapping.stopped
+
 
 @dataclass(frozen=True)
 class _PreparedTrajectory:
@@ -85,6 +89,9 @@ def _add_motion_costs(
     duration = float(prepared.times[-1])
     for index, step in enumerate(np.diff(prepared.times)):
         left, right = prepared.nodes[index : index + 2]
+        # 两端的姿态和速度均已固定时，该段平滑代价为常量。
+        if left.fixed and right.fixed:
+            continue
         prepared.problem.add_residual_block(
             MotionCost(
                 prepared.layout,
@@ -150,14 +157,36 @@ def _add_frame_tasks(
         )
 
 
+def _solve_node_times(project: Project) -> FloatArray:
+    # 动作首尾及所有关键帧作为分段边界，保留作者给出的准确时间。
+    boundaries = np.unique([0.0, project.duration, *(key.time for key in project.keyframes)])
+    # 沿用规则网格插入关键帧后的节点预算，几乎重合的规则节点只计一次。
+    regular_count = max(2, int(np.ceil(project.duration * project.settings.solve_fps)) + 1)
+    regular = np.linspace(0.0, project.duration, regular_count)
+    right = np.searchsorted(boundaries, regular).clip(1, len(boundaries) - 1)
+    distance = np.minimum(regular - boundaries[right - 1], boundaries[right] - regular)
+    interval_count = len(boundaries) - 1 + int(np.count_nonzero(distance > 1e-8))
+
+    # 各段至少有一个区间，按与时长比例的差额补足或扣减整数区间。
+    ideal = np.diff(boundaries) / project.duration * interval_count
+    intervals = np.maximum(1, np.floor(ideal).astype(int))
+    remaining = interval_count - int(intervals.sum())
+    while remaining > 0:
+        intervals[int(np.argmax(ideal - intervals))] += 1
+        remaining -= 1
+    while remaining < 0:
+        intervals[int(np.argmax(np.where(intervals > 1, intervals - ideal, -np.inf)))] -= 1
+        remaining += 1
+
+    parts: list[FloatArray] = [boundaries[:1]]
+    for start, end, count in zip(boundaries[:-1], boundaries[1:], intervals, strict=True):
+        parts.append(np.linspace(float(start), float(end), int(count) + 1)[1:])
+    return np.concatenate(parts)
+
+
 def _prepare(robot: Robot, project: Project) -> _PreparedTrajectory:
     settings = project.settings
-    # 非帧对齐关键帧作为独立节点加入，避免约束被舍入或漏掉。
-    regular = np.linspace(0, project.duration, max(2, int(np.ceil(project.duration * settings.solve_fps)) + 1))
-    protected = np.unique([0.0, project.duration, *(key.time for key in project.keyframes)])
-    # 优先保留作者给出的准确时间，移除与其几乎重合的规则节点，避免极短时间步。
-    extra = [time for time in regular if not np.any(np.isclose(protected, time, rtol=0, atol=1e-8))]
-    times: FloatArray = np.sort(np.r_[protected, extra])
+    times = _solve_node_times(project)
     loop = settings.terminal_condition == "loop"
     # 循环区间的两个端点必须引用不同节点。
     if loop and len(times) == 2:
@@ -168,6 +197,7 @@ def _prepare(robot: Robot, project: Project) -> _PreparedTrajectory:
     count = len(times)
     key_indices = {key.id: int(np.argmin(abs(times - key.time))) for key in project.keyframes}
     fixed = {key_indices[key.id] for key in project.keyframes if key.locked}
+    stops = {key_indices[key.id] for key in project.keyframes if key.zero_velocity}
     for key in project.keyframes:
         if key.locked:
             initial[key_indices[key.id]] = key.qpos
@@ -175,6 +205,10 @@ def _prepare(robot: Robot, project: Project) -> _PreparedTrajectory:
         initial[0] = initial[-1] = keyframes.qpos[0]
         if count - 1 in fixed:
             fixed.add(0)
+        if count - 1 in stops:
+            stops.add(0)
+    else:
+        stops.update((0, count - 1))
 
     # 节点持有参数数组；PyCeres 问题负责保留残差和流形对象的引用。
     problem = pyceres.Problem()
@@ -205,14 +239,15 @@ def _prepare(robot: Robot, project: Project) -> _PreparedTrajectory:
 
         incoming = float(steps[index - 1]) if index > 0 or loop else None
         outgoing = float(steps[index]) if index < len(steps) else None
-        mapping = KnotVelocity(robot, incoming, outgoing, stopped=not loop and index == count - 1)
+        mapping = KnotVelocity(robot, incoming, outgoing, stopped=index in stops)
         velocity = mapping.add_block(problem, initial[index], velocities[index])
         nodes.append(_SolveNode(pose, locked, mapping, velocity))
     if loop:
         # 末时刻引用首节点的姿态、速度与锁定状态。
         nodes.append(nodes[0])
     prepared = _PreparedTrajectory(times, nodes, layout, problem)
-    if robot.model.nv == 0:
+    # 全部节点的姿态和速度均已固定时，直接生成轨迹。
+    if robot.model.nv == 0 or all(node.fixed for node in nodes):
         return prepared
 
     # 姿态偏好仅来自作者显式给出的未锁定关键帧，并只作用于对应时刻。
@@ -240,9 +275,9 @@ def _prepare(robot: Robot, project: Project) -> _PreparedTrajectory:
             contacts = detect_support_contacts(foot_contacts(robot, data), nearest=True)
             problem.add_residual_block(SupportCost(robot, contacts, settings, count), None, node.pose)
     if environment.collision_pairs and (settings.self_collision > 0 or settings.ground_collision > 0):
-        pairs = np.asarray(environment.collision_pairs, dtype=int)
-        ground = np.any(environment.model.geom_bodyid[pairs] == 0, axis=1)
-        weights = np.sqrt(np.where(ground, settings.ground_collision, settings.self_collision) / count)
+        weights = np.sqrt(
+            np.where(environment.ground_collision_mask, settings.ground_collision, settings.self_collision) / count
+        )
         for _, node in free:
             problem.add_residual_block(
                 CollisionCost(robot, weights, margin_cm=settings.collision_margin_cm),

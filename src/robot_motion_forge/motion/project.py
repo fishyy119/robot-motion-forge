@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from itertools import pairwise
 from typing import Self
 
 import mujoco as mj
@@ -37,16 +38,12 @@ class Project(MotionModel):
 
     @model_validator(mode="after")
     def check_timeline(self) -> Self:
-        times: list[float] = []
-        identifiers: list[str] = []
-        for key in self.keyframes:
-            if key.time > self.duration:
-                raise ValueError("关键帧时间必须在动作范围内")
-            if any(abs(key.time - time) < 1e-8 for time in times):
-                raise ValueError("两个关键帧不能位于相同时间")
-            times.append(key.time)
-            identifiers.append(key.id)
-        if len(set(identifiers)) != len(identifiers):
+        times = sorted(key.time for key in self.keyframes)
+        if times[-1] > self.duration:
+            raise ValueError("关键帧时间必须在动作范围内")
+        if any(later - earlier < 1e-8 for earlier, later in pairwise(times)):
+            raise ValueError("两个关键帧不能位于相同时间")
+        if len({key.id for key in self.keyframes}) != len(self.keyframes):
             raise ValueError("工程包含重复 ID")
         return self
 
@@ -85,7 +82,7 @@ class Project(MotionModel):
 
     def solve_fingerprint(self) -> str:
         content: dict[str, object] = {
-            "solver_version": 4,
+            "solver_version": 7,
             "duration": self.duration,
             "settings": self.settings.model_dump(),
             "frame_tasks": {name: task.model_dump() for name, task in self.frame_tasks.items()},

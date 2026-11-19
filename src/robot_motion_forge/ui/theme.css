@@ -1,0 +1,240 @@
+:root {
+    /* 抵消 Viser 的 92.5% 缩放，保留浏览器默认根字号与用户的字号偏好。 */
+    font-size: 100%;
+    --rmf-font-family: "Inter", "Noto Sans SC", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    --mantine-font-family: var(--rmf-font-family);
+    --mantine-font-family-headings: var(--rmf-font-family);
+    --mantine-spacing-xs: 0.5rem;
+    --rmf-font-control: 0.875rem;
+    --rmf-font-caption: 0.75rem;
+    --rmf-space-control: 0.75rem;
+    --rmf-curve-cursor-color: #b45309;
+}
+/* 原生标签使用 dimmed；仅修正文字对比度，不重定义控件的交互状态和背景。 */
+:root[data-mantine-color-scheme="light"] {
+    --mantine-color-dimmed: #475569;
+}
+:root[data-mantine-color-scheme="dark"] {
+    --mantine-color-dimmed: #b8c1cc;
+    --rmf-curve-cursor-color: #fbbf24;
+}
+body {
+    font-family: var(--rmf-font-family);
+    font-size: var(--rmf-font-control);
+}
+/* 原生内联样式包含字号和负字距，仅在这些排版属性上覆盖。 */
+.mantine-Text-root:has(> label),
+:is(.mantine-Input-input, .mantine-Combobox-option, .mantine-Button-root, .mantine-Button-label),
+:is([role="tablist"], [role="tab"], [data-dock-unmergeable-header]) {
+    font-size: var(--rmf-font-control) !important;
+    letter-spacing: normal !important;
+}
+.mantine-Slider-markLabel {
+    font-size: var(--rmf-font-caption) !important;
+    color: var(--mantine-color-dimmed);
+}
+[data-rmf-timeline-mark] {
+    margin-block-start: var(--rmf-slider-mark-offset);
+    max-inline-size: 6rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    pointer-events: auto;
+    cursor: pointer;
+
+    &:hover,
+    &:focus-visible {
+        z-index: 1;
+        background: var(--mantine-color-body);
+        color: var(--mantine-color-text);
+        text-decoration: underline;
+    }
+}
+/* 统一紧凑控件的高度，按钮组仍由 Viser 自行换行和分配宽度。 */
+:is(.mantine-Input-input, .mantine-Button-root) {
+    min-height: 1.75rem !important;
+}
+/* 控件包装层统一行距，按钮组内部的排列仍由 Viser 管理。 */
+div:has(> .mantine-Flex-root > div > .mantine-Text-root > label),
+div:not(.mantine-Flex-root):has(> .mantine-Button-root[id]) {
+    padding-bottom: var(--rmf-space-control) !important;
+}
+/* 固定标签栏宽度，不随分组层级缩窄，长关节名优先保留在同一行。 */
+.mantine-Flex-root:has(> div > .mantine-Text-root > label) {
+    --rmf-label-width: 7.5rem;
+
+    & > div:has(> .mantine-Text-root > label) {
+        width: var(--rmf-label-width) !important;
+    }
+    & > div:last-child {
+        min-width: 0;
+    }
+    /* 侧栏变窄时，将滑块或三轴输入整体换到下一行，保留名称与数值。 */
+    &:has(.mantine-Slider-root, .mantine-Flex-root > .mantine-NumberInput-root:nth-child(3)) {
+        flex-wrap: wrap;
+        row-gap: 0.25rem;
+    }
+    &:has(.mantine-Slider-root) {
+        --rmf-label-width: 10.5rem;
+
+        & > div:last-child {
+            flex-basis: 10rem;
+        }
+    }
+    & > div:has(> .mantine-Flex-root > .mantine-NumberInput-root:nth-child(3)) {
+        flex-basis: 15rem;
+    }
+}
+/* 滑块附带的数值框留足小数与负号的宽度，避免被滑条挤压。 */
+.mantine-Slider-root + .mantine-NumberInput-root {
+    width: 6rem !important;
+    flex-shrink: 0;
+}
+.mantine-Slider-root:has(.mantine-Slider-markLabel) {
+    /* 刻度文字为绝对定位，须单独为其留出高度，换行后也不能侵入下一控件。 */
+    padding-bottom: 1.125rem !important;
+
+    &:has([data-rmf-timeline-mark]) {
+        /* 时间轴标签下移，为滑块右侧的时间输入框留出空间。 */
+        --rmf-slider-mark-offset: 1.5rem;
+        padding-bottom: calc(1.625rem + var(--rmf-slider-mark-offset)) !important;
+    }
+}
+/* 分组标题浮在上边框，外侧间距和内侧留白分别为它预留空间。 */
+.mantine-Paper-root:has(> .mantine-Paper-root + [aria-hidden]) {
+    margin-block: 1.25rem !important;
+    padding-bottom: 0.5rem;
+
+    &:last-child {
+        margin-bottom: 0 !important;
+    }
+    & > .mantine-Paper-root {
+        font-size: 1rem;
+    }
+    /* 只调整内容层内边距，保留 Viser 对折叠高度、动画与显隐的管理。 */
+    & > .mantine-Paper-root + [aria-hidden] > div {
+        padding-top: 1rem !important;
+    }
+}
+
+.rmf-project-directory,
+[data-rmf-arrangement] {
+    padding: 0.5rem 0.75rem;
+    font-size: var(--rmf-font-control);
+    line-height: 1.5;
+}
+/* 固定工程目录仅展示文本，长路径换行并允许选中复制。 */
+.rmf-project-directory {
+    margin: 0;
+    padding-bottom: var(--rmf-space-control);
+
+    & dt {
+        margin-bottom: 0.25rem;
+        color: var(--mantine-color-dimmed);
+    }
+    & dd {
+        margin: 0;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        user-select: text;
+    }
+}
+[data-rmf-arrangement] {
+    font-variant-numeric: tabular-nums;
+
+    & table {
+        width: 100%;
+        table-layout: fixed;
+        border-collapse: collapse;
+    }
+    & :is(th, td) {
+        padding: 0.4rem 0.5rem;
+        border-bottom: 1px solid var(--mantine-color-default-border);
+        text-align: left;
+        overflow-wrap: anywhere;
+    }
+    & th {
+        color: var(--mantine-color-dimmed);
+        font-weight: 500;
+    }
+    & .rmf-key-time {
+        width: 6rem;
+        text-align: right;
+        white-space: nowrap;
+    }
+    & .rmf-key-lock {
+        width: 3rem;
+        text-align: center;
+    }
+}
+.rmf-curve-cursor {
+    position: absolute;
+    inset-block: 0;
+    width: 1px;
+    margin-left: -0.5px;
+    background: var(--rmf-curve-cursor-color);
+    pointer-events: none;
+    z-index: 1;
+}
+
+.rmf-frame-menu,
+.rmf-scene-tooltip {
+    position: fixed;
+    z-index: 2147483647;
+    width: max-content;
+    max-width: min(28rem, calc(100vw - 1rem));
+    border: 1px solid var(--mantine-color-default-border);
+    border-radius: 0.375rem;
+    background: var(--mantine-color-body);
+    color: var(--mantine-color-text);
+    box-shadow: 0 3px 12px #0003;
+}
+.rmf-scene-tooltip,
+.rmf-frame-menu-title {
+    font-size: var(--rmf-font-caption);
+    overflow-wrap: anywhere;
+}
+/* 场景提示只展示对象名称，不覆盖指针事件，也不固定占用场景空间。 */
+.rmf-scene-tooltip {
+    pointer-events: none;
+    padding: 0.375rem 0.5rem;
+    white-space: pre-line;
+}
+.rmf-frame-menu {
+    min-width: min(16rem, calc(100vw - 1rem));
+    padding: 0.25rem;
+}
+.rmf-frame-menu-groups {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    border-top: 1px solid var(--mantine-color-default-border);
+}
+.rmf-frame-menu-title {
+    margin: 0;
+    padding: 0.25rem 0.5rem;
+    color: var(--mantine-color-dimmed);
+}
+.rmf-frame-menu button {
+    display: block;
+    width: 100%;
+    padding: 0.375rem 0.5rem;
+    border: 0;
+    border-radius: 0.25rem;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+
+    &:hover {
+        background: var(--mantine-color-default-hover);
+    }
+    &::before {
+        content: "";
+        display: inline-block;
+        width: 1.5em;
+    }
+    &.selected::before {
+        content: "✓";
+    }
+}

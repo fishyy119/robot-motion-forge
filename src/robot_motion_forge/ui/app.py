@@ -20,9 +20,9 @@ from .controllers import (
     SolveController,
 )
 from .layout import PlaybackPanel, Sidebar
-from .tabs.joint_curves import configure_joint_curves
 from .theme import apply_theme
-from .viewer import RobotView, configure_scene
+from .viewer import RobotView
+from .viser_bridge import register_browser_extensions
 
 if TYPE_CHECKING:
     from viser import ClientHandle, IcosphereHandle, SceneClickEvent, SceneNodePointerEvent
@@ -51,8 +51,7 @@ class ForgeApp:
         self._workspace = workspace
         project_path = workspace.project_path(project_name)
         self.server = viser.ViserServer(host=host, port=port)
-        configure_scene(self.server)
-        configure_joint_curves(self.server)
+        register_browser_extensions(self.server)
         self.editor = editor
         # 客户端随操作入队，操作通知发给触发操作的浏览器。
         self._events: Queue[_QueuedAction] = Queue()
@@ -85,7 +84,7 @@ class ForgeApp:
 
         self.server.scene.on_click()(on_scene_click)
 
-        def on_marker_click(event: SceneNodePointerEvent[IcosphereHandle]) -> None:
+        async def on_marker_click(event: SceneNodePointerEvent[IcosphereHandle]) -> None:
             epoch = self._epoch
             frame = event.target.name.removeprefix("/frames/")
             self._events.put(
@@ -111,9 +110,7 @@ class ForgeApp:
         self._display_project_revision = e.project_revision
         self.sidebar = Sidebar(controls, robot=e.robot, project=project, qpos=draft.qpos, project_path=project_path)
         self.playback_panel = PlaybackPanel(controls, project=project, cursor=draft.cursor)
-        self.playback = PlaybackController(
-            e, self.playback_panel.timeline, reset_target=lambda: self.pose.reset_target()
-        )
+        self.playback = PlaybackController(e, reset_target=lambda: self.pose.reset_target())
         self.pose = PoseController(
             e,
             self.sidebar.pose,
@@ -152,7 +149,10 @@ class ForgeApp:
         self.sidebar.pose.bind_actions(self.pose)
         self.sidebar.solve.bind_actions(self.solve)
         self.playback_panel.timeline.bind_actions(
-            seek=self.playback.seek, set_source=self.playback.set_source, toggle_play=self.playback.toggle
+            seek=self.playback.seek,
+            select_key=self.arrangement.select_key,
+            set_source=self.playback.set_source,
+            toggle_play=self.playback.toggle,
         )
         self.playback_panel.display.bind_actions(
             change_theme=self._change_theme,
@@ -203,7 +203,7 @@ class ForgeApp:
             else:
                 self.sidebar.arrangement.sync_key(project, selected_key=draft.selected_key, cursor=draft.cursor)
             self.sidebar.joint_curves.refresh(e.trajectory, draft.cursor)
-            self.playback_panel.timeline.sync_cursor(draft.cursor)
+            self.playback_panel.timeline.sync_cursor(draft.cursor, draft.pose_source)
             self.pose.sync(draft)
             if self._display_state is None or self._display_state.collisions != display.collisions:
                 self.view.show_collisions(display.collisions)

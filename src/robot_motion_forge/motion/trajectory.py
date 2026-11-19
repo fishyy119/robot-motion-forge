@@ -55,13 +55,15 @@ class ReferenceTrajectory(_TrajectoryNodes):
 
     @cached_property
     def interpolation_knots(self) -> tuple[FloatArray, FloatArray]:
-        """用边界外的邻点让现有插值器计算循环切线与静止参考的零末切线。"""
+        """用边界外的邻点让现有插值器计算循环切线与静止参考的首尾零切线。"""
         if self.terminal_condition is None or len(self.times) < 2:
             return self.times, self.qpos
         first, last = self.times[0], self.times[-1]
         if self.terminal_condition == "rest":
-            # 延续末姿态，PCHIP 和球面 Bézier 在末关键帧的切线都为零。
-            return np.r_[self.times, last + (last - first)], np.vstack((self.qpos, self.qpos[-1]))
+            # 延续首尾姿态，PCHIP 和球面 Bézier 在两端的切线都为零。
+            duration = last - first
+            times = np.r_[first - duration, self.times, last + duration]
+            return times, np.vstack((self.qpos[0], self.qpos, self.qpos[-1]))
         # 循环首尾是同一节点，两侧各补一个来自相邻周期的邻点。
         times = np.r_[first - (last - self.times[-2]), self.times, last + (self.times[1] - first)]
         return times, np.vstack((self.qpos[-2], self.qpos, self.qpos[1]))

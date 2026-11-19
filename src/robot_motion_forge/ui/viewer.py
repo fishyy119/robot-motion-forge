@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import mujoco as mj
 import numpy as np
 from numpy.typing import ArrayLike
-from viser import _messages
 
 from robot_motion_forge.robot.environment import GROUND_HEIGHT_M
 from robot_motion_forge.robot.model import Robot
@@ -116,10 +114,9 @@ class RobotView:
             thickness=2.0,
             thickness_units="screen",
         )
-        self._hover_labels: dict[str, str] = {f"/frames/{name}": f"控制坐标系 · {name}" for name in robot.frames}
+        self._hover_labels: dict[str, str] = {}
         self.bind_gui()
         self._update_joint_colors()
-        self.set_control_hint("")
 
     def bind_gui(self) -> None:
         """界面重建时重新挂载提示数据，保留静态场景节点。"""
@@ -266,9 +263,3 @@ class RobotView:
                     np.stack((points, np.roll(points, -1, axis=0)), axis=1), dtype=np.float32
                 )
                 self._support_boundary.colors = np.tile(np.asarray(color, dtype=np.uint8), (len(points), 2, 1))
-
-
-def configure_scene(server: ViserServer) -> None:
-    # Viser 未公开小球置顶、拾取优先级和场景悬停提示，仅补足这些配置；位姿和事件仍使用原生 API。
-    source = Path(__file__).with_name("scene.js").read_text(encoding="utf-8")
-    server._websock_server.queue_message(_messages.RunJavascriptMessage(source=source))  # pyright: ignore[reportPrivateUsage]

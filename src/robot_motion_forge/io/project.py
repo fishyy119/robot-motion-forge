@@ -3,13 +3,13 @@
 import json
 from copy import deepcopy
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import Literal, NamedTuple, cast
 
 import numpy as np
 from pydantic import Field
 
 from robot_motion_forge.motion.constraints import EditConstraints
-from robot_motion_forge.motion.draft import Draft
+from robot_motion_forge.motion.draft import Draft, PoseSource
 from robot_motion_forge.motion.project import Project
 from robot_motion_forge.motion.trajectory import SolvedTrajectory, validate_trajectory
 from robot_motion_forge.motion.types import JointNames, MotionModel, Name
@@ -24,6 +24,7 @@ class SavedDraft(MotionModel):
     selected_key: Name | None
     held_key: Name | None
     constraints: EditConstraints
+    pose_source: PoseSource = "previous_keyframe"
 
 
 class SavedSolution(MotionModel):
@@ -41,7 +42,7 @@ class ProjectFile(MotionModel):
     project: Project
     draft: SavedDraft
     # 先核对指纹，再解析求解器生成的数据。
-    solution: dict[str, object] | None = None
+    solution: object = None
 
 
 class LoadedProject(NamedTuple):
@@ -78,10 +79,33 @@ def save_project(
             selected_key=draft.selected_key,
             held_key=draft.held_key,
             constraints=draft.constraints.model_copy(deep=True),
+            pose_source=draft.pose_source,
         ),
         solution=saved,
     )
     atomic_json(path.expanduser().resolve(), document.model_dump(exclude={"solution"} if saved is None else set()))
+
+
+def _load_solution(cache: object, robot: Robot, project: Project) -> SolvedTrajectory | None:
+    # 先判定缓存是否可复用；即使缓存的数据结构损坏，工程与草稿仍可加载。
+    if not isinstance(cache, dict):
+        return None
+    record = cast(dict[str, object], cache)
+    if record.get("fingerprint") != project.solve_fingerprint():
+        return None
+    try:
+        saved = SavedSolution.model_validate(record)
+        trajectory = SolvedTrajectory(
+            np.asarray(saved.times, dtype=float),
+            np.asarray(saved.qpos, dtype=float),
+            np.asarray(saved.qvel, dtype=float),
+            saved.converged,
+            saved.message,
+        )
+        validate_trajectory(robot, project.duration, trajectory)
+    except ValueError:
+        return None
+    return trajectory
 
 
 def load_project(path: Path, robot: Robot) -> LoadedProject:
@@ -97,19 +121,9 @@ def load_project(path: Path, robot: Robot) -> LoadedProject:
         selected_key=document.draft.selected_key,
         held_key=document.draft.held_key,
         constraints=document.draft.constraints.model_copy(deep=True),
+        pose_source=document.draft.pose_source,
     )
     draft.validate(robot, project)
-    cache = document.solution
-    trajectory = None
-    #! 此处禁止添加过宽泛的门禁，比如具体的偏移定义等
-    if cache is not None and cache.get("fingerprint") == project.solve_fingerprint():
-        saved = SavedSolution.model_validate(cache)
-        trajectory = SolvedTrajectory(
-            np.asarray(saved.times, dtype=float),
-            np.asarray(saved.qpos, dtype=float),
-            np.asarray(saved.qvel, dtype=float),
-            saved.converged,
-            saved.message,
-        )
-        validate_trajectory(robot, project.duration, trajectory)
+    # 缓存按工程输入和轨迹数据校验，模型几何的变更由使用者自行管理。
+    trajectory = _load_solution(document.solution, robot, project)
     return LoadedProject(project=project, draft=draft, trajectory=trajectory)

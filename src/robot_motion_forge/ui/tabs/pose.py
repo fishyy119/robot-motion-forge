@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from functools import partial
 from typing import TYPE_CHECKING, NamedTuple, Protocol
@@ -14,6 +15,7 @@ from robot_motion_forge.robot.model import FloatArray, Robot
 from robot_motion_forge.rotations import rotation_from_wxyz
 
 from ..controls import CONTROL_MODES, grouped_joint_names
+from ..viser_bridge import gui_uuid
 
 if TYPE_CHECKING:
     from viser import ClientHandle, GuiCheckboxHandle, GuiDropdownHandle, GuiNumberHandle, GuiSliderHandle
@@ -112,6 +114,18 @@ class PoseTab:
                             hint=f"已锁定 · {'m' if slide else 'rad'}",
                         )
         self._home_button = controls.button("恢复初始姿态")
+
+    def frame_menu_metadata(self) -> str:
+        # 场景菜单提交到对应的侧栏下拉框，沿用固定部位和拖拽的状态同步。
+        dropdowns = {
+            f"/frames/{name}": {
+                "固定模式": gui_uuid(handle),
+                "控制模式": gui_uuid(self._target_modes[name]),
+            }
+            for name, handle in self._anchor_modes.items()
+        }
+        data = json.dumps(dropdowns, ensure_ascii=False).replace("<", "\\u003c")
+        return f'<script type="application/json" data-rmf-frame-dropdowns>{data}</script>'
 
     def bind_actions(self, actions: PoseActions) -> None:
         controls = self._controls

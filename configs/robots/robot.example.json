@@ -11,7 +11,7 @@
     },
   },
   "home": {
-    "position_m": [0.0, 0.0, 0.3855],
+    "position_m": [0.0, 0.0, 0.3855021],
   },
   "frames": {
     "torso": {
@@ -48,6 +48,16 @@
         [0.0, 0.0, -10.75],
         [2.2, 0.0, -10.6],
       ],
+    },
+    "left_knee": {
+      "body": "left_knee_link",
+      "offset_m": [0.0, 0.0, -0.035],
+      "control_mode": "pose",
+    },
+    "right_knee": {
+      "body": "right_knee_link",
+      "offset_m": [0.0, 0.0, 0.035],
+      "control_mode": "pose",
     },
     "left_hand": {
       "body": "left_elbow_link",

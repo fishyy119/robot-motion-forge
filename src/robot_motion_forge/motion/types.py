@@ -61,6 +61,7 @@ class Keyframe(MotionModel):
     qpos: list[float]
     name: str = "关键帧"
     locked: bool = True
+    zero_velocity: bool = False
     id: Name = Field(default_factory=lambda: uuid4().hex[:12])
 
 

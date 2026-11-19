@@ -37,15 +37,19 @@ class ArrangementController:
         self._notifications.show("关键帧已添加")
 
     def update_key(
-        self, key_id: str, *, time: float | None = None, name: str | None = None, locked: bool | None = None
+        self,
+        key_id: str,
+        *,
+        time: float | None = None,
+        name: str | None = None,
+        locked: bool | None = None,
+        zero_velocity: bool | None = None,
     ) -> None:
         self._pause()
         self._reset_target()
-        self._editor.update_key(key_id, time=time, name=name, locked=locked)
+        self._editor.update_key(key_id, time=time, name=name, locked=locked, zero_velocity=zero_velocity)
 
-    def delete_key(self) -> None:
-        if (key_id := self._editor.draft_snapshot().selected_key) is None:
-            raise ValueError("请先选择关键帧")
+    def delete_key(self, key_id: str) -> None:
         self._pause()
         self._reset_target()
         self._editor.delete_key(key_id)

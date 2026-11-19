@@ -5,14 +5,13 @@ from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
-from typing import Literal
 
 import numpy as np
 from numpy.typing import ArrayLike
 
 from robot_motion_forge.io.project import load_project, save_project
 from robot_motion_forge.motion.constraints import EditConstraints
-from robot_motion_forge.motion.draft import Draft
+from robot_motion_forge.motion.draft import Draft, PoseSource
 from robot_motion_forge.motion.project import Project
 from robot_motion_forge.motion.trajectory import ReferenceTrajectory, SolvedTrajectory, validate_trajectory
 from robot_motion_forge.motion.types import FrameTask, Keyframe, PoseTarget, SolverSettings
@@ -20,8 +19,6 @@ from robot_motion_forge.robot.definition import ControlMode
 from robot_motion_forge.robot.model import FloatArray, Robot
 from robot_motion_forge.solvers.drag import DragResult, follow_target
 from robot_motion_forge.solvers.ik import IKResult, solve_ik
-
-type PoseSource = Literal["previous_keyframe", "trajectory"]
 
 
 @dataclass(frozen=True)
@@ -48,7 +45,6 @@ class Editor:
         if trajectory is not None:
             validate_trajectory(robot, project.duration, trajectory)
         self._trajectory = trajectory
-        self._pose_source: PoseSource = "previous_keyframe"
         self._reference: ReferenceTrajectory | None = None
         self._undo: list[_EditState] = []
         self._redo: list[_EditState] = []
@@ -97,8 +93,18 @@ class Editor:
             fingerprint = candidate.solve_fingerprint()
         else:
             candidate, fingerprint = old.project, old.solve_fingerprint
-        draft.validate(self.robot, candidate)
-        if candidate == old.project and draft.matches(old.draft):
+        self._commit_edit(_EditState(candidate, draft, fingerprint), merge_key)
+
+    def _edit_draft(self, operation: Callable[[Draft], None], *, merge_key: tuple[str, str] | None = None) -> None:
+        old = self._state
+        draft = deepcopy(old.draft)
+        operation(draft)
+        self._commit_edit(_EditState(old.project, draft, old.solve_fingerprint), merge_key)
+
+    def _commit_edit(self, state: _EditState, merge_key: tuple[str, str] | None) -> None:
+        old = self._state
+        state.draft.validate(self.robot, state.project)
+        if (state.project is old.project or state.project == old.project) and state.draft.matches(old.draft):
             return
         now = monotonic()
         # 连续拖拽、滑块与文字编辑合并撤销；停顿或切换操作后开启新记录。
@@ -107,7 +113,7 @@ class Editor:
             self._undo = self._undo[-100:]
         self._merge_key, self._last_edit_time = merge_key, now
         self._redo.clear()
-        self._commit(_EditState(candidate, draft, fingerprint))
+        self._commit(state)
 
     def finish_edit(self) -> None:
         self._merge_key = None
@@ -115,7 +121,7 @@ class Editor:
     def _commit(self, state: _EditState) -> None:
         previous, self._state = self._state, state
         self.revision += 1
-        if previous.project != state.project:
+        if previous.project is not state.project and previous.project != state.project:
             self.project_revision += 1
             old, new = previous.project, state.project
             if (
@@ -186,13 +192,14 @@ class Editor:
 
     @property
     def pose_source(self) -> PoseSource:
-        return self._pose_source
+        return self._state.draft.pose_source
 
     def set_pose_source(self, source: PoseSource) -> None:
-        if source != self._pose_source:
-            self._pose_source = source
-            self._state.draft.held_key = None
-            self.scrub(self._state.draft.cursor)
+        draft = self._state.draft
+        if source != draft.pose_source:
+            draft.pose_source = source
+            draft.held_key = None
+            self.scrub(draft.cursor)
 
     def _previous_key(self, time: float) -> Keyframe:
         keys = self._state.project.keyframes
@@ -207,7 +214,7 @@ class Editor:
         key = min(self._state.project.keyframes, key=lambda key: (abs(key.time - time), key.time))
         # 滑块按步长取整，命中后吸附到关键帧的准确时刻；轨迹取样始终作为独立草稿。
         snapped = abs(key.time - time) <= snap_tolerance + 1e-8
-        if self._pose_source == "trajectory":
+        if self.pose_source == "trajectory":
             self.seek(key.time if snapped else time)
             return
         if snapped:
@@ -278,10 +285,18 @@ class Editor:
         self._move_cursor(key.time, np.array(key.qpos), selected=key.id, held=key.id)
 
     def update_key(
-        self, key_id: str, *, time: float | None = None, name: str | None = None, locked: bool | None = None
+        self,
+        key_id: str,
+        *,
+        time: float | None = None,
+        name: str | None = None,
+        locked: bool | None = None,
+        zero_velocity: bool | None = None,
     ) -> None:
         def operation(project: Project, draft: Draft) -> None:
-            key = next(k for k in project.keyframes if k.id == key_id)
+            key = next((k for k in project.keyframes if k.id == key_id), None)
+            if key is None:
+                raise ValueError("关键帧已不存在")
             if time is not None:
                 key.time = time
                 if draft.selected_key == key_id:
@@ -290,9 +305,12 @@ class Editor:
                 key.name = name
             if locked is not None:
                 key.locked = locked
+            if zero_velocity is not None:
+                key.zero_velocity = zero_velocity
 
-        fields = [field for field, value in {"time": time, "name": name, "locked": locked}.items() if value is not None]
-        merge_key = (fields[0], key_id) if len(fields) == 1 and fields[0] != "locked" else None
+        updates = {"time": time, "name": name, "locked": locked, "zero_velocity": zero_velocity}
+        fields = [field for field, value in updates.items() if value is not None]
+        merge_key = (fields[0], key_id) if len(fields) == 1 and fields[0] in ("time", "name") else None
         self.edit(operation, merge_key=merge_key)
 
     def delete_key(self, key_id: str) -> None:
@@ -306,50 +324,62 @@ class Editor:
         self.edit(operation)
 
     def _set_pose(self, qpos: FloatArray, *, merge: bool = True, constraints: EditConstraints | None = None) -> None:
-        def operation(project: Project, draft: Draft) -> None:
-            if draft.selected_key is not None:
-                key = next(key for key in project.keyframes if key.id == draft.selected_key)
-                if abs(key.time - draft.cursor) > 1e-8:
-                    draft.selected_key = None
-                else:
-                    key.qpos = qpos.tolist()
+        current = self._state.draft
+        selected = current.selected_key
+        if selected is not None:
+            key = next(key for key in self._state.project.keyframes if key.id == selected)
+            if abs(key.time - current.cursor) > 1e-8:
+                selected = None
+
+        def update_draft(draft: Draft) -> None:
+            draft.selected_key = selected
             draft.qpos = qpos.copy()
-            if self._pose_source == "previous_keyframe" and draft.held_key is None:
+            if draft.pose_source == "previous_keyframe" and draft.held_key is None:
                 draft.held_key = self._previous_key(draft.cursor).id
             if constraints is not None:
                 draft.constraints = constraints.model_copy(deep=True)
 
-        self.edit(operation, merge_key=("pose", self._state.draft.selected_key or "draft") if merge else None)
+        merge_key = ("pose", current.selected_key or "draft") if merge else None
+        if selected is None:
+            self._edit_draft(update_draft, merge_key=merge_key)
+            return
+
+        def update_key(project: Project, draft: Draft) -> None:
+            key = next(key for key in project.keyframes if key.id == selected)
+            key.qpos = qpos.tolist()
+            update_draft(draft)
+
+        self.edit(update_key, merge_key=merge_key)
 
     def set_joint_locked(self, name: str, locked: bool) -> None:
         if name not in self.robot.joint_names:
             raise ValueError(f"未知关节：{name}")
 
-        def operation(project: Project, draft: Draft) -> None:
+        def operation(draft: Draft) -> None:
             joints = draft.constraints.locked_joints
             if locked and name not in joints:
                 joints.append(name)
             elif not locked and name in joints:
                 joints.remove(name)
 
-        self.edit(operation)
+        self._edit_draft(operation)
 
     def unlock_all_joints(self) -> None:
-        self.edit(lambda project, draft: draft.constraints.locked_joints.clear())
+        self._edit_draft(lambda draft: draft.constraints.locked_joints.clear())
 
     def set_anchor(self, name: str, mode: ControlMode | None) -> None:
         self.robot.frame(name)
 
-        def operation(project: Project, draft: Draft) -> None:
+        def operation(draft: Draft) -> None:
             if mode is None:
                 draft.constraints.anchors.pop(name, None)
             elif name not in draft.constraints.anchors or draft.constraints.anchors[name].mode != mode:
                 draft.constraints.capture(self.robot, self.robot.forward(draft.qpos), name, mode)
 
-        self.edit(operation)
+        self._edit_draft(operation)
 
     def clear_fixed_parts(self) -> None:
-        self.edit(lambda project, draft: draft.constraints.anchors.clear())
+        self._edit_draft(lambda draft: draft.constraints.anchors.clear())
 
     def reset_pose(self) -> None:
         initial = Draft.initial(self.robot)

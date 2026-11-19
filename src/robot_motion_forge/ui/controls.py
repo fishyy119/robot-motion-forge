@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from functools import partial
 from typing import TYPE_CHECKING, Protocol
 
@@ -46,9 +46,9 @@ class Controls:
 
     def client_action[HandleT](
         self, prepare: Callable[[ClientHandle, HandleT], Callable[[], None] | None]
-    ) -> Callable[[_ClientEvent[HandleT]], None]:
-        def callback(event: _ClientEvent[HandleT]) -> None:
-            # Viser 的程序赋值也可能触发回调，只处理客户端编辑；命令参数在入队前固定。
+    ) -> Callable[[_ClientEvent[HandleT]], Coroutine[None, None, None]]:
+        async def callback(event: _ClientEvent[HandleT]) -> None:
+            # 在 Viser 接收线程中取值并入队，避免线程池里的延迟回调读取下一条消息的控件值。
             if event.client is not None:
                 action = prepare(event.client, event.target)
                 if action is not None:

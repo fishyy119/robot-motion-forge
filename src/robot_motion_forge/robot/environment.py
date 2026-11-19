@@ -36,9 +36,9 @@ class Environment:
         self.collision_pairs = self._collision_pairs()
         self._pair_array = np.asarray(self.collision_pairs, dtype=int).reshape(-1, 2)
         # 纯机器人不含 world 几何，与 world 的碰撞即地面碰撞。
-        ground_pairs = np.any(self.model.geom_bodyid[self._pair_array] == 0, axis=1)
-        self.self_collision_pairs = self._pair_array[~ground_pairs]
-        self.ground_collision_pairs = self._pair_array[ground_pairs]
+        self.ground_collision_mask = np.any(self.model.geom_bodyid[self._pair_array] == 0, axis=1)
+        self.self_collision_pairs = self._pair_array[~self.ground_collision_mask]
+        self.ground_collision_pairs = self._pair_array[self.ground_collision_mask]
 
     def forward(self, qpos: ArrayLike, data: mj.MjData | None = None) -> mj.MjData:
         state = mj.MjData(self.model) if data is None else data

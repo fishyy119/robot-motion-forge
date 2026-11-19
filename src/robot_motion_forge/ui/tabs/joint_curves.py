@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from math import degrees
 from typing import TYPE_CHECKING
 
 import mujoco as mj
 import numpy as np
-from viser import _messages
 
 from ..controls import grouped_joint_names
 
 if TYPE_CHECKING:
-    from viser import GuiFolderHandle, GuiUplotHandle, ViserServer
+    from viser import GuiFolderHandle, GuiUplotHandle
 
     from robot_motion_forge.motion.trajectory import SolvedTrajectory
     from robot_motion_forge.robot.model import FloatArray, Robot
@@ -41,7 +40,7 @@ class JointCurvesTab:
         self._cursor_time = gui.add_html("")
         self._status = gui.add_markdown("尚无求解结果" if robot.joint_names else "模型没有可绘制的关节")
         self._folders: list[GuiFolderHandle] = []
-        self._plots: dict[int, tuple[GuiUplotHandle, float]] = {}
+        self._plots: dict[int, tuple[GuiUplotHandle, float, float]] = {}
         joints = {name: index for index, name in enumerate(robot.joint_names)}
         for group, names in grouped_joint_names(robot).items():
             folder = gui.add_folder(group, expand_by_default=False, visible=False)
@@ -50,8 +49,9 @@ class JointCurvesTab:
                 for name in names:
                     index = joints[name]
                     slide = robot.model.jnt_type[robot.joint_ids[index]] == mj.mjtJoint.mjJNT_SLIDE
-                    unit = "m" if slide else "rad"
-                    minimum_span = 0.001 if slide else 0.01
+                    unit = "m" if slide else "°"
+                    unit_factor = 1.0 if slide else degrees(1.0)
+                    minimum_span = (0.001 if slide else 0.01) * unit_factor
                     plot = gui.add_uplot(
                         data=_EMPTY_DATA,
                         series=(
@@ -82,7 +82,7 @@ class JointCurvesTab:
                         cursor={"x": False, "y": False, "points": {"show": False}},
                         height=156,
                     )
-                    self._plots[index] = plot, minimum_span
+                    self._plots[index] = plot, unit_factor, minimum_span
 
     def refresh(self, trajectory: SolvedTrajectory | None, cursor: float) -> None:
         # 游标只发送一个时刻；播放期间复用已采样的曲线数据。
@@ -92,7 +92,7 @@ class JointCurvesTab:
         if trajectory is self._trajectory or not self._plots:
             return
         if trajectory is None:
-            for plot, _ in self._plots.values():
+            for plot, _, _ in self._plots.values():
                 plot.data = _EMPTY_DATA
         else:
             # 保留求解节点的准确时刻，并补充节点间的连续曲线采样。
@@ -100,8 +100,9 @@ class JointCurvesTab:
             times = np.union1d(trajectory.times, uniform)
             positions = trajectory.sample(self._robot, times)[:, self._robot.qadr]
             velocities = trajectory.sample_joint_velocities(self._robot, times)
-            for index, (plot, minimum_span) in self._plots.items():
-                position, velocity = positions[:, index], velocities[:, index]
+            for index, (plot, unit_factor, minimum_span) in self._plots.items():
+                position = positions[:, index] * unit_factor
+                velocity = velocities[:, index] * unit_factor
                 plot.scales = {
                     "x": {"time": False},
                     "y": {"range": _axis_range(position, minimum_span)},
@@ -113,9 +114,3 @@ class JointCurvesTab:
             folder.visible = trajectory is not None
         self._status.visible = trajectory is None
         self._trajectory = trajectory
-
-
-def configure_joint_curves(server: ViserServer) -> None:
-    # Viser 的 Python 图表句柄未提供定位游标的接口，由浏览器更新标线。
-    source = Path(__file__).with_suffix(".js").read_text(encoding="utf-8")
-    server._websock_server.queue_message(_messages.RunJavascriptMessage(source=source))  # pyright: ignore[reportPrivateUsage]
