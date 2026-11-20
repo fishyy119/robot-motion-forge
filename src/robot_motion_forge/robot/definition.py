@@ -1,12 +1,21 @@
 """机器人定义的 Pydantic 2 模型及 JSON Schema，不依赖本机资产。"""
 
-import math
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationInfo, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
-type Name = Annotated[str, StringConstraints(min_length=1, pattern=r"\S")]
+from robot_motion_forge.utils.pydantic_models import Name
+from robot_motion_forge.utils.rotations import normalize_wxyz
+
 type Number = Annotated[float, Field(strict=True, allow_inf_nan=False)]
 type Vector3 = tuple[Number, Number, Number]
 type Quaternion = tuple[Number, Number, Number, Number]
@@ -55,10 +64,11 @@ class HomePose(DefinitionModel):
     def normalize_quaternion(cls, value: Quaternion | None) -> Quaternion | None:
         if value is None:
             return None
-        norm = math.hypot(*value)
-        if not math.isfinite(norm) or norm < 1e-9:
-            raise ValueError("home.quaternion_wxyz 必须是非零有限 wxyz 四元数")
-        return value[0] / norm, value[1] / norm, value[2] / norm, value[3] / norm
+        try:
+            w, x, y, z = normalize_wxyz(value)
+        except ValueError as exc:
+            raise ValueError("home.quaternion_wxyz 必须是非零有限 wxyz 四元数") from exc
+        return float(w), float(x), float(y), float(z)
 
 
 class ControlFrame(DefinitionModel):
@@ -75,8 +85,8 @@ class ControlFrame(DefinitionModel):
     offset: Vector3 = Field(
         default=(0.0, 0.0, 0.0), alias="offset_m", description="控制坐标系原点在连杆局部坐标中的位置，单位 m"
     )
-    support_polygon_cm: list[Vector3] = Field(
-        default_factory=list[Vector3],
+    support_polygon_cm: tuple[Vector3, ...] = Field(
+        default_factory=tuple[Vector3, ...],
         description="足底接触轮廓顶点，控制坐标系局部坐标，单位 cm；至少三个共面且不共线的点",
     )
     control_mode: ControlMode = Field(
@@ -93,6 +103,7 @@ class ControlFrame(DefinitionModel):
         exclude_if=lambda value: value is None,
         description="启用 trajectory_mode 后可指定轨迹参考连杆的 MuJoCo 名称。省略或设为 null 时使用世界坐标系。",
     )
+    _support_normal: tuple[float, float, float] | None = PrivateAttr(default=None)
 
     @field_validator("trajectory_reference_body")
     @classmethod
@@ -101,18 +112,25 @@ class ControlFrame(DefinitionModel):
             raise ValueError("指定 trajectory_reference_body 时必须启用 trajectory_mode")
         return value
 
-    @field_validator("support_polygon_cm")
-    @classmethod
-    def validate_support_polygon(cls, value: list[Vector3]) -> list[Vector3]:
-        if not value:
-            return value
-        if len(value) < 3 or len(set(value)) != len(value):
+    @model_validator(mode="after")
+    def validate_support_polygon(self) -> Self:
+        vertices = self.support_polygon_cm
+        if not vertices:
+            return self
+        if len(vertices) < 3 or len(set(vertices)) != len(vertices):
             raise ValueError("足底轮廓至少需要三个不同的顶点")
-        centered = np.asarray(value, dtype=float) - value[0]
+        centered = np.asarray(vertices, dtype=float) - vertices[0]
         _, singular, axes = np.linalg.svd(centered, full_matrices=False)
-        if singular[1] < 1e-8 or np.max(np.abs(centered @ axes[-1])) > 1e-6:
+        normal = axes[-1]
+        if singular[1] < 1e-8 or np.max(np.abs(centered @ normal)) > 1e-6:
             raise ValueError("足底轮廓顶点必须共面且不共线")
-        return value
+        x, y, z = normal
+        self._support_normal = (float(x), float(y), float(z))
+        return self
+
+    @property
+    def support_normal(self) -> tuple[float, float, float] | None:
+        return self._support_normal
 
 
 class RobotDefinition(DefinitionModel):
@@ -139,8 +157,8 @@ class RobotDefinition(DefinitionModel):
     @classmethod
     def validate_frame_names(cls, value: dict[str, ControlFrame]) -> dict[str, ControlFrame]:
         for name in value:
-            if "/" in name or name.startswith("joint:"):
-                raise ValueError(f"坐标系名称不可包含 / 或以 joint: 开头：{name}")
+            if "/" in name:
+                raise ValueError(f"坐标系名称不可包含 /：{name}")
         return value
 
 

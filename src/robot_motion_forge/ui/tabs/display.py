@@ -25,14 +25,7 @@ class DisplayTab:
         self._support_visible = controls.gui.add_checkbox("显示支撑区域", initial_value=True)
         self._theme_button = controls.gui.add_button("暗色主题")
 
-    def bind_actions(
-        self,
-        *,
-        change_theme: Callable[[], None],
-        refresh: Callable[[], None],
-    ) -> None:
-        for handle in (self._collision_visible, self._com_visible, self._support_visible):
-            self._controls.input(handle, lambda _: refresh())
+    def bind_actions(self, *, change_theme: Callable[[], None]) -> None:
         self._controls.click(self._theme_button, change_theme)
 
     @property

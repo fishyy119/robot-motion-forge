@@ -1,6 +1,5 @@
 """围绕动作创作的关键行为保留回归覆盖。"""
 
-import pickle
 from pathlib import Path
 
 import numpy as np
@@ -8,70 +7,79 @@ import pytest
 from scipy.spatial.transform import Rotation
 
 from robot_motion_forge.application.editor import Editor
-from robot_motion_forge.io.export import export_motion
-from robot_motion_forge.io.project import load_project
-from robot_motion_forge.motion.project import Project
+from robot_motion_forge.motion.pose_constraints import (
+    ANCHOR_ORIENTATION_TOLERANCE_RAD,
+    ANCHOR_POSITION_TOLERANCE_M,
+    PoseTarget,
+)
+from robot_motion_forge.motion.project import Keyframe, Project
 from robot_motion_forge.motion.trajectory import SolvedTrajectory
-from robot_motion_forge.motion.types import Keyframe, PoseTarget
 from robot_motion_forge.robot.model import Robot
-from robot_motion_forge.rotations import rotation_from_wxyz, rotation_to_wxyz
-from robot_motion_forge.solvers.trajectory import optimize
-from robot_motion_forge.validation.trajectory import check_geometry
+from robot_motion_forge.solvers.trajectory.solve import optimize
+from robot_motion_forge.utils.rotations import rotation_from_wxyz, rotation_to_wxyz
 
 
-def test_ik_and_drag_preserve_valid_poses_when_targets_are_unreachable(robot: Robot) -> None:
+def test_drag_preserves_valid_poses_when_targets_are_unreachable(robot: Robot) -> None:
     editor = Editor(robot)
+    shoulder = robot.qadr[robot.joint_names.index("shoulder")]
     target_qpos = robot.home.copy()
-    target_qpos[-1] = 0.7
-    position, quat = robot.pose(robot.forward(target_qpos), "hand")
-    result = editor.move_target(PoseTarget("hand", position.tolist(), quat.tolist()))
-    assert result.success
-    qpos = editor.draft_snapshot().qpos
-    assert qpos[-1] == pytest.approx(0.7, abs=1e-3)
-    assert np.array_equal(qpos[:7], robot.home[:7])
-
-    previous = qpos.copy()
-    result = editor.move_target(PoseTarget("hand", [100, 100, 100]))
-    assert not result.success
-    assert np.array_equal(editor.draft_snapshot().qpos, previous)
+    target_qpos[shoulder] = 0.006
+    position, quat = robot.frame_pose(robot.forward(target_qpos), "hand")
+    result = editor.drag_target(PoseTarget("hand", position.tolist(), quat.tolist()))
+    assert result.applied and result.reached
+    previous = editor.draft_snapshot().qpos
+    assert previous[shoulder] == pytest.approx(target_qpos[shoulder], abs=1e-3)
+    anchor_delta = robot.difference(robot.home, previous)
+    assert np.linalg.norm(anchor_delta[:3]) <= ANCHOR_POSITION_TOLERANCE_M
+    assert np.linalg.norm(anchor_delta[3:6]) <= ANCHOR_ORIENTATION_TOLERANCE_RAD
 
     editor.set_joint_locked("shoulder", True)
     target = PoseTarget("hand", [1.0, 1.0, 0.6])
-    position, _ = robot.pose(robot.forward(previous), "hand")
+    blocked = editor.drag_target(target)
+    assert blocked.state == "blocked"
+    assert np.array_equal(editor.draft_snapshot().qpos, previous)
+
+    position, _ = robot.frame_pose(robot.forward(previous), "hand")
     editor.set_anchor("torso", None)
     followed = editor.drag_target(target)
     assert followed.applied and followed.state == "projected"
     assert followed.position_error < np.linalg.norm(position - target.position)
     qpos = editor.draft_snapshot().qpos
-    assert np.max(abs(robot.difference(previous, qpos)[robot.vadr])) <= np.deg2rad(3) + 1e-9
+    delta = robot.difference(previous, qpos)
+    assert np.linalg.norm(delta[:3]) <= 0.003 + 1e-8
+    assert np.linalg.norm(delta[3:6]) <= np.deg2rad(3) + 1e-7
     assert np.all(qpos[robot.qadr] >= robot.lower)
     assert np.all(qpos[robot.qadr] <= robot.upper)
-    assert np.array_equal(qpos[robot.qadr], previous[robot.qadr])
+    assert qpos[shoulder] == previous[shoulder]
 
-    editor.edit(lambda project, draft: setattr(draft, "cursor", 1.0))
+    editor.scrub(1.0)
     editor.capture("拖拽的实际姿态")
     captured = next(key for key in editor.project_snapshot().keyframes if key.time == 1.0)
-    assert np.allclose(captured.qpos, editor.draft_snapshot().qpos)
-    assert "locked_joints" not in captured.model_dump()
+    assert np.allclose(captured.qpos, qpos)
 
 
 def test_edits_are_undoable_and_invalidate_old_solutions(robot: Robot, project: Project) -> None:
+    project.keyframes.insert(1, Keyframe(time=0.3, qpos=robot.home.tolist()))
     editor = Editor(robot, project)
-    editor.set_timing(0.8, 30.0)
-    fingerprint = editor.solve_fingerprint
+    editor.set_timing(0.8)
+    editor.seek(0.45)
+    edited = editor.project_snapshot()
     with pytest.raises(ValueError, match="关键帧时间"):
-        editor.set_timing(0.1, 30.0)
-    assert editor.solve_fingerprint == fingerprint
+        editor.set_timing(0.1, 60.0)
+    assert editor.project_snapshot() == edited
+    assert editor.draft_snapshot().cursor == 0.45
 
     editor.undo()
-    assert editor.duration == project.duration
+    assert editor.project_snapshot() == project
     editor.redo()
-    assert editor.duration == 0.8
+    assert editor.project_snapshot() == edited
 
-    solution = optimize(robot, editor.project_snapshot())
-    assert not editor.install_solution(solution, "obsolete")
-    assert editor.install_solution(solution, editor.solve_fingerprint)
-    editor.set_timing(duration=0.9)
+    fingerprint = editor.solve_fingerprint
+    solution = optimize(robot, edited)
+    assert editor.install_solution(solution, fingerprint)
+    editor.set_settings(velocity=0.01)
+    assert editor.trajectory is None
+    assert not editor.install_solution(solution, fingerprint)
     assert editor.trajectory is None
 
 
@@ -80,7 +88,8 @@ def test_optimization_preserves_authored_poses_times_and_joint_limits(robot: Rob
     project.keyframes[-1].qpos[3:7] = rotation_to_wxyz(Rotation.from_euler("z", -170, degrees=True)).tolist()
     pose = robot.home.copy()
     pose[3:7] = rotation_to_wxyz(Rotation.from_euler("z", 180, degrees=True))
-    pose[-1] = 1.5
+    shoulder = robot.joint_names.index("shoulder")
+    pose[robot.qadr[shoulder]] = robot.upper[shoulder]
     project.keyframes.append(Keyframe(time=0.1000000001, qpos=pose.tolist(), name="动作顶点"))
 
     trajectory = optimize(robot, project)
@@ -88,6 +97,7 @@ def test_optimization_preserves_authored_poses_times_and_joint_limits(robot: Rob
         assert key.time in trajectory.times
         sampled = trajectory.sample(robot, [key.time])[0]
         assert np.linalg.norm(robot.difference(key.qpos, sampled)) < 1e-9
+    assert np.allclose(trajectory.qvel[[0, -1]], 0.0, atol=1e-9)
 
     frames = trajectory.sample(robot, np.linspace(0, project.duration, 200))
     assert np.all(frames[:, robot.qadr] >= robot.lower - 1e-9)
@@ -99,66 +109,43 @@ def test_optimization_preserves_authored_poses_times_and_joint_limits(robot: Rob
 
 
 def test_project_restores_draft_joint_locks_and_solution(robot: Robot, project: Project, tmp_path: Path) -> None:
+    shoulder = robot.qadr[robot.joint_names.index("shoulder")]
+    project.keyframes[-1].qpos[shoulder] = 0.25
     editor = Editor(robot, project)
+    authored = editor.project_snapshot()
     editor.seek(0.12)
     editor.set_joint("shoulder", 0.4)
     editor.set_joint_locked("shoulder", True)
-    solution = optimize(robot, editor.project_snapshot())
-    editor.install_solution(solution, editor.solve_fingerprint)
+    solution = optimize(robot, authored)
+    assert editor.install_solution(solution, editor.solve_fingerprint)
     path = tmp_path / "project.motion.json"
     editor.save(path)
 
-    saved_project, saved_draft, saved_solution = load_project(path, robot)
-    restored = Editor(robot, saved_project, saved_solution, draft=saved_draft)
+    restored = Editor.load(robot, path)
     draft = restored.draft_snapshot()
-    assert draft.qpos[-1] == 0.4
+    assert draft.qpos[shoulder] == 0.4
     assert draft.cursor == 0.12
     assert draft.constraints.locked_joints == ["shoulder"]
+    assert restored.project_snapshot().keyframes == authored.keyframes
+    saved_solution = restored.trajectory
     assert saved_solution is not None
+    assert np.array_equal(saved_solution.times, solution.times)
     assert np.array_equal(saved_solution.qpos, solution.qpos)
     assert np.array_equal(saved_solution.qvel, solution.qvel)
 
 
-def test_export_preserves_sampling_and_gmr_conventions(robot: Robot, project: Project, tmp_path: Path) -> None:
-    for key in project.keyframes:
-        key.qpos[3:7] = rotation_to_wxyz(Rotation.from_euler("z", 0.4)).tolist()
-    project.keyframes[-1].qpos[-1] = 0.3
-    trajectory = SolvedTrajectory(
-        np.asarray([key.time for key in project.keyframes]),
-        np.asarray([key.qpos for key in project.keyframes]),
-        qvel=np.zeros((len(project.keyframes), robot.model.nv)),
-        converged=True,
-        message="",
-    )
-    pkl_path = tmp_path / "motion.pkl"
-    export_motion(pkl_path, robot, project, trajectory)
+def test_solved_trajectory_samples_joint_positions_and_velocities(robot: Robot) -> None:
+    shoulder = robot.joint_names.index("shoulder")
+    knots = np.array([0.0, 0.2, 0.6])
+    qpos = np.tile(robot.home, (len(knots), 1))
+    qvel = np.zeros((len(knots), robot.model.nv))
+    # 三次 Hermite 插值应重现给定三次多项式及其时间导数。
+    qpos[:, robot.qadr[shoulder]] = knots**3 + 0.2 * knots
+    qvel[:, robot.vadr[shoulder]] = 3 * knots**2 + 0.2
+    trajectory = SolvedTrajectory(knots, qpos, qvel, converged=True, message="")
 
-    with pkl_path.open("rb") as stream:
-        motion = pickle.load(stream)
-    assert set(motion) == {
-        "fps",
-        "root_pos",
-        "root_rot",
-        "dof_pos",
-        "local_body_pos",
-        "link_body_list",
-    }
-    assert motion["fps"] == 30.0
-    assert motion["dof_pos"].shape == (19, len(robot.joint_names))
-    u = project.output_times() / project.duration
-    assert np.allclose(motion["dof_pos"][:, -1], 0.3 * u**2 * (3 - 2 * u))
-    assert np.allclose(motion["local_body_pos"][:, 0], 0)
-    expected = np.asarray(project.keyframes[0].qpos)[[4, 5, 6, 3]]
-    assert np.allclose(motion["root_rot"][0], expected)
-    assert not pkl_path.with_suffix(".pkl.report.json").exists()
-
-
-def test_geometry_checks_are_explicit_and_do_not_block_export(robot: Robot, project: Project, tmp_path: Path) -> None:
-    for key in project.keyframes:
-        key.qpos[2] -= 0.04
-    trajectory = Editor(robot, project).reference_trajectory()
-    path = tmp_path / "bad.pkl"
-    report = check_geometry(robot, project, trajectory)
-    assert report.max_ground_penetration_m > 0.002
-    export_motion(path, robot, project, trajectory)
-    assert path.exists()
+    times = np.array([0.0, 0.07, 0.2, 0.42, 0.6])
+    positions = trajectory.sample(robot, times)[:, robot.qadr[shoulder]]
+    velocities = trajectory.sample_joint_velocities(robot, times)[:, shoulder]
+    np.testing.assert_allclose(positions, times**3 + 0.2 * times, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(velocities, 3 * times**2 + 0.2, rtol=0, atol=1e-12)

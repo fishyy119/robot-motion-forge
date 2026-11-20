@@ -6,20 +6,19 @@ import numpy as np
 import pyceres
 from scipy.spatial.transform import Rotation
 
-from robot_motion_forge.motion.trajectory import hermite_basis
+from robot_motion_forge.motion.interpolation import hermite_basis
 from robot_motion_forge.robot.definition import ControlMode
-from robot_motion_forge.robot.model import FloatArray
-from robot_motion_forge.robot.task_frame import TaskFrame
-from robot_motion_forge.rotations import (
+from robot_motion_forge.robot.kinematics import ControlFrameKinematics
+from robot_motion_forge.utils.array_types import FloatArray
+from robot_motion_forge.utils.rotations import (
     inverse_right_jacobian,
     log_end_tangent,
-    log_jacobian_coefficient,
+    log_end_tangent_jacobian,
     rotation_from_wxyz,
     skew,
 )
 
-from .trajectory_costs import Jacobians, Parameters, PoseLayout, write_jacobians
-from .velocity import KnotVelocity
+from .parameters import Jacobians, KnotVelocityMap, Parameters, PoseLayout, write_jacobians
 
 
 @dataclass(frozen=True)
@@ -32,68 +31,29 @@ class _MotionState:
     velocity_block: FloatArray | None
 
 
-def _log_tangent_jacobian(delta: FloatArray, omega: FloatArray) -> FloatArray:
-    """末端 Log 导数 J_l(delta)^(-1) omega 对 delta 的雅可比。"""
-    angle2 = float(delta @ delta)
-    c = float(log_jacobian_coefficient(np.asarray(angle2)))
-    if angle2 < 0.01:
-        dc = 1 / 720 + 2 * angle2 / 30240 + angle2**2 / 403200
-    else:
-        half = np.sqrt(angle2) / 2
-        dc = (-1 / np.tan(half) + half / np.sin(half) ** 2) / (8 * half * angle2) - c / angle2
-    dot = float(delta @ omega)
-    cross2 = delta * dot - angle2 * omega
-    return (
-        0.5 * skew(omega)
-        + c * (dot * np.eye(3) + np.outer(delta, omega) - 2 * np.outer(omega, delta))
-        + 2 * dc * np.outer(cross2, delta)
-    )
-
-
-def _frame_velocity_derivative(
-    frame: TaskFrame, pose: FloatArray, velocity: FloatArray, jacobian: FloatArray
-) -> FloatArray:
-    """在广义速度固定时，对姿态求 J(q)v 的导数。"""
-    if not np.any(velocity):
-        return np.zeros_like(jacobian)
-    # 交换混合偏导，只沿 v 做一次中心差分。基座右增量与任务空间角速度
-    # 的坐标轴随姿态转动，交换时分别加上输入和输出的李括号项。
-    step = 1e-5 / max(1.0, float(np.linalg.norm(velocity, ord=np.inf)))
-    offset = step * velocity
-    robot = frame.robot
-    plus = frame.state(robot.integrate(pose, offset), jacobian=True).jacobian
-    minus = frame.state(robot.integrate(pose, -offset), jacobian=True).jacobian
-    assert plus is not None and minus is not None
-    derivative = (plus - minus) / (2 * step)
-    if robot.floating:
-        derivative[:, 3:6] -= jacobian[:, 3:6] @ skew(velocity[3:6])
-    derivative[3:] -= skew(jacobian[3:] @ velocity) @ jacobian[3:]
-    return derivative
-
-
-class MotionCost(pyceres.CostFunction):
+class SmoothnessCost(pyceres.CostFunction):
     """关节、基座与控制坐标系共用区间积分，旋转在起点的 Log 坐标中积分。"""
 
     def __init__(
         self,
         layout: PoseLayout,
-        bounds: tuple[KnotVelocity, KnotVelocity],
+        velocity_maps: tuple[KnotVelocityMap, KnotVelocityMap],
         step: float,
         duration: float,
         velocity_weight: float,
         acceleration_weight: float,
         *,
-        frame: TaskFrame | None = None,
+        frame: ControlFrameKinematics | None = None,
         mode: ControlMode = "pose",
         task_weight: float = 1.0,
     ) -> None:
         super().__init__()
-        self.layout, self.bounds, self.frame = layout, bounds, frame
+        self.layout, self.velocity_maps, self.frame = layout, velocity_maps, frame
         robot = layout.robot
         self.width = len(layout.sizes) + 1
         self.set_parameter_block_sizes([*layout.sizes, robot.model.nv] * 2)
-        self.qidx = np.r_[:3, robot.qadr] if robot.floating else robot.qadr
-        self.vidx = np.r_[:3, robot.vadr] if robot.floating else robot.vadr
+        self.qidx = robot.linear_qpos_indices
+        self.vidx = robot.linear_qvel_indices
         self.track_position = frame is None or mode in ("position", "pose")
         self.track_orientation = robot.floating if frame is None else mode in ("orientation", "pose")
         linear_size = len(self.qidx) if frame is None else 3 * int(self.track_position)
@@ -119,7 +79,7 @@ class MotionCost(pyceres.CostFunction):
             scales[linear_size:] = np.sqrt(task_weight) / np.deg2rad(1.0)
         self.weights: FloatArray = weights[:, :, None] * scales
 
-    def _state(self, parameters: Parameters, mapping: KnotVelocity, *, jacobian: bool) -> _MotionState:
+    def _state(self, parameters: Parameters, mapping: KnotVelocityMap, *, jacobian: bool) -> _MotionState:
         pose = self.layout.unpack(parameters[:-1])
         velocity, pose_slope, block_slope = mapping.decode(pose, parameters[-1], jacobian=jacobian)
         if self.frame is not None:
@@ -130,7 +90,7 @@ class MotionCost(pyceres.CostFunction):
             derivative = None
             if pose_slope is not None:
                 derivative = spatial * pose_slope
-                derivative += _frame_velocity_derivative(self.frame, pose, velocity, state.jacobian)[self.rows]
+                derivative += self.frame.velocity_pose_jacobian(pose, velocity, state.jacobian)[self.rows]
             return _MotionState(
                 state.position if self.track_position else np.empty(0),
                 state.orientation if self.track_orientation else None,
@@ -158,8 +118,8 @@ class MotionCost(pyceres.CostFunction):
 
     def Evaluate(self, parameters: Parameters, residuals: FloatArray, jacobians: Jacobians) -> bool:
         left, right = parameters[: self.width], parameters[self.width :]
-        a = self._state(left, self.bounds[0], jacobian=jacobians is not None)
-        b = self._state(right, self.bounds[1], jacobian=jacobians is not None)
+        a = self._state(left, self.velocity_maps[0], jacobian=jacobians is not None)
+        b = self._state(right, self.velocity_maps[1], jacobian=jacobians is not None)
         displacement, end_speed = b.position - a.position, b.velocity
         delta = None
         omega = b.velocity[-3:]
@@ -181,7 +141,7 @@ class MotionCost(pyceres.CostFunction):
             log_left, log_right = inverse_right_jacobian(-delta), inverse_right_jacobian(delta)
             da[-3:] = log_right @ da[-3:]
             db[-3:] = log_left @ db[-3:]
-            d_log = _log_tangent_jacobian(delta, omega)
+            d_log = log_end_tangent_jacobian(delta, omega)
             end_a[-3:] = d_log @ da[-3:]
             end_b[-3:] = d_log @ db[-3:] + log_left @ end_b[-3:]
             end_block[-3:] = log_left @ end_block[-3:]

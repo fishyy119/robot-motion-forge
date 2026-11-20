@@ -1,4 +1,4 @@
-"""Mink / DAQP 多目标 IK，支持关节锁定与控制坐标系的世界位姿锚定。"""
+"""Mink / DAQP 增量 IK，支持关节锁定与控制坐标系的世界位姿锚定。"""
 
 # qpsolvers.solve_problem 尚未标注 **kwargs 的类型。
 # pyright: reportUnknownMemberType=false
@@ -9,25 +9,41 @@ import mink
 import mujoco as mj
 import numpy as np
 import qpsolvers
-from numpy.typing import ArrayLike
 
-from robot_motion_forge.motion.constraints import EditConstraints
-from robot_motion_forge.motion.types import PoseTarget
-from robot_motion_forge.robot.model import FloatArray, Robot
-from robot_motion_forge.rotations import rotation_from_wxyz
+from robot_motion_forge.motion.pose_constraints import EditConstraints, PoseTarget
+from robot_motion_forge.robot.model import Robot
+from robot_motion_forge.utils.array_types import FloatArray
 
-from .constraint_space import LINEAR_CONSTRAINT_TOLERANCE, ConstraintSpace, InconsistentConstraints
+LINEAR_CONSTRAINT_TOLERANCE = 1e-9
 
 
-def pose_error(robot: Robot, data: mj.MjData, target: PoseTarget) -> FloatArray:
-    position, orientation = robot.pose(data, target.frame)
-    # 保留位置、方向的三维分块，未启用的位置任务不产生误差。
-    error = position - target.position if target.track_position else np.zeros(3)
-    if target.quaternion is not None:
-        error = np.r_[
-            error, (rotation_from_wxyz(target.quaternion).inv() * rotation_from_wxyz(orientation)).as_rotvec()
-        ]
-    return error
+class InconsistentConstraints(ValueError):
+    """当前线性化中的硬约束没有共同解。"""
+
+
+@dataclass(frozen=True)
+class ConstraintSpace:
+    # J Δq = b 的可行增量为 Δq = offset + basis z；basis 的列正交归一。
+    offset: FloatArray
+    basis: FloatArray
+
+    @classmethod
+    def from_equalities(cls, jacobian: FloatArray, feedback: FloatArray) -> "ConstraintSpace":
+        size = jacobian.shape[1]
+        if not len(jacobian):
+            return cls(np.zeros(size), np.eye(size))
+        left, singular, right = np.linalg.svd(jacobian, full_matrices=True)
+        # 只消去机器精度下的相关行，保留模型中虽弱但真实存在的约束方向。
+        threshold = np.finfo(float).eps * max(jacobian.shape) * singular[0] if len(singular) else 0.0
+        rank = int(np.count_nonzero(singular > threshold))
+        components = left[:, :rank].T @ feedback
+        residual = feedback - left[:, :rank] @ components
+        if np.linalg.norm(residual, ord=np.inf) > LINEAR_CONSTRAINT_TOLERANCE * max(
+            1.0, float(np.linalg.norm(feedback, ord=np.inf))
+        ):
+            raise InconsistentConstraints("当前线性化中的固定约束不一致")
+        offset = right[:rank].T @ (components / singular[:rank])
+        return cls(offset, right[rank:].T)
 
 
 class _AnchorTask(mink.Task):
@@ -66,37 +82,10 @@ class _AnchorTask(mink.Task):
 class PoseIK:
     """同一次姿态求解的任务、硬锁定与 MuJoCo 运动学状态。"""
 
-    def __init__(
-        self,
-        robot: Robot,
-        qpos: FloatArray,
-        targets: list[PoseTarget],
-        *,
-        constraints: EditConstraints,
-        position_cost: float = 1.0,
-        orientation_cost: float = 0.3,
-    ) -> None:
+    def __init__(self, robot: Robot, qpos: FloatArray, *, constraints: EditConstraints) -> None:
         self.configuration = mink.Configuration(robot.model, qpos)
-        self.tasks: list[mink.Task] = []
-        for target in targets:
-            target.validate(robot)
-            _, orientation = robot.pose(self.configuration.data, target.frame)
-            task = mink.FrameTask(
-                robot.model.site(robot.frame_site_ids[target.frame]).name,
-                "site",
-                position_cost=position_cost if target.track_position else 0.0,
-                orientation_cost=orientation_cost if target.quaternion is not None else 0.0,
-            )
-            task.set_target(
-                mink.SE3.from_rotation_and_translation(
-                    mink.SO3(np.asarray(target.quaternion) if target.quaternion is not None else orientation),
-                    np.asarray(target.position),
-                )
-            )
-            self.tasks.append(task)
-        posture = mink.PostureTask(robot.model, cost=0.001)
-        posture.set_target(qpos)
-        self.tasks.append(posture)
+        self._posture = mink.PostureTask(robot.model, cost=0.001)
+        self._posture.set_target(qpos)
         constraints.validate_robot(robot)
         frozen = [int(robot.vadr[robot.joint_names.index(name)]) for name in constraints.locked_joints]
         self.frozen = np.asarray(sorted(set(frozen)), dtype=int)
@@ -114,10 +103,11 @@ class PoseIK:
             np.concatenate([-task.gain * task.compute_error(self.configuration) for task in self.constraints]),
         )
 
-    def increment(self) -> FloatArray:
+    def increment(self, target: mink.FrameTask | None = None) -> FloatArray:
         # 虚拟时间步为 1，优化变量即本次切空间增量。
         self.configuration.check_limits(safety_break=False)
-        problem = mink.build_ik(self.configuration, self.tasks, dt=1.0, damping=1e-6, limits=self.limits)
+        tasks = [target, self._posture] if target is not None else [self._posture]
+        problem = mink.build_ik(self.configuration, tasks, dt=1.0, damping=1e-6, limits=self.limits)
         try:
             space = ConstraintSpace.from_equalities(*self.equalities())
         except InconsistentConstraints as exc:
@@ -150,48 +140,3 @@ class PoseIK:
         # 将硬锁定的数值舍入误差归零，避免连续交互积累漂移。
         delta[self.frozen] = 0.0
         return delta
-
-
-@dataclass
-class IKResult:
-    qpos: FloatArray
-    success: bool
-    position_error: float
-    orientation_error: float
-
-
-def solve_ik(
-    robot: Robot,
-    qpos: ArrayLike,
-    targets: list[PoseTarget],
-    *,
-    constraints: EditConstraints | None = None,
-    max_iterations: int = 60,
-) -> IKResult:
-    qpos = robot.validate_qpos(qpos)
-    if not targets:
-        return IKResult(qpos, True, 0.0, 0.0)
-    constraints = constraints if constraints is not None else EditConstraints()
-    problem = PoseIK(robot, qpos, targets, constraints=constraints)
-    for _ in range(max_iterations):
-        try:
-            delta = problem.increment()
-        except mink.NoSolutionFound:
-            break
-        if not np.isfinite(delta).all():
-            break
-        solved = robot.integrate(problem.configuration.q, delta)
-        solved[robot.qadr] = np.clip(solved[robot.qadr], robot.lower, robot.upper)
-        problem.configuration.update(solved)
-        errors = [pose_error(robot, problem.configuration.data, target) for target in targets]
-        if max(np.linalg.norm(error) for error in errors) < 1e-5 or np.linalg.norm(delta) < 1e-9:
-            break
-    errors = [pose_error(robot, problem.configuration.data, target) for target in targets]
-    position = max(float(np.linalg.norm(error[:3])) for error in errors)
-    orientation = max((float(np.linalg.norm(error[3:])) for error in errors if len(error) == 6), default=0.0)
-    success = (
-        position <= 0.01
-        and orientation <= 0.08
-        and constraints.violated_anchor(robot, problem.configuration.data) is None
-    )
-    return IKResult(problem.configuration.q.copy(), success, position, orientation)

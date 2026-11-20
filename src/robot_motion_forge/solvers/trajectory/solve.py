@@ -8,19 +8,17 @@ import numpy as np
 import pyceres
 
 from robot_motion_forge.motion.project import Project
-from robot_motion_forge.motion.task_reference import TaskReference
 from robot_motion_forge.motion.trajectory import ReferenceTrajectory, SolvedTrajectory
 from robot_motion_forge.robot.definition import ControlMode
-from robot_motion_forge.robot.model import FloatArray, Robot
-from robot_motion_forge.robot.support import detect_support_contacts, foot_contacts
-from robot_motion_forge.robot.task_frame import TaskFrame
-from robot_motion_forge.rotations import rotation_from_wxyz
+from robot_motion_forge.robot.kinematics import ControlFrameKinematics
+from robot_motion_forge.robot.model import Robot
+from robot_motion_forge.utils.array_types import FloatArray
 
-from .collision import CollisionCost
-from .motion_cost import MotionCost
-from .support import SupportCost
-from .trajectory_costs import FrameReferenceCost, LinearReferenceCost, PoseLayout, RotationReferenceCost
-from .velocity import KnotVelocity
+from .collision import CollisionCost, collision_model_for
+from .parameters import KnotVelocityMap, PoseLayout
+from .reference import FrameReferenceCost, LinearReferenceCost, RotationReferenceCost, sample_frame_reference
+from .smoothness import SmoothnessCost
+from .support import SupportCost, initial_support_contacts
 
 
 class SolveCancelled(RuntimeError):
@@ -50,7 +48,7 @@ class _IterationCallback(pyceres.IterationCallback):
 class _SolveNode:
     pose: list[FloatArray]
     locked: bool
-    velocity_mapping: KnotVelocity
+    velocity_mapping: KnotVelocityMap
     velocity: FloatArray
 
     @property
@@ -75,12 +73,12 @@ class _PreparedTrajectory:
         return SolvedTrajectory(self.times, qpos, qvel, converged, message)
 
 
-def _add_motion_costs(
+def _add_smoothness_costs(
     prepared: _PreparedTrajectory,
     velocity: float,
     acceleration: float,
     *,
-    frame: TaskFrame | None = None,
+    frame: ControlFrameKinematics | None = None,
     mode: ControlMode = "pose",
     task_weight: float = 1.0,
 ) -> None:
@@ -93,7 +91,7 @@ def _add_motion_costs(
         if left.fixed and right.fixed:
             continue
         prepared.problem.add_residual_block(
-            MotionCost(
+            SmoothnessCost(
                 prepared.layout,
                 (left.velocity_mapping, right.velocity_mapping),
                 float(step),
@@ -109,45 +107,24 @@ def _add_motion_costs(
         )
 
 
-def _initial_velocity(
-    robot: Robot, keyframes: ReferenceTrajectory, times: FloatArray, initial: FloatArray, *, loop: bool
-) -> FloatArray:
-    # 从关键帧参考曲线取切线；循环接缝的两侧属于相邻周期。
-    epsilon = float(np.min(np.diff(times))) * 1e-5
-    duration = times[-1]
-    if loop:
-        left, right = (times - epsilon) % duration, (times + epsilon) % duration
-        span = np.full_like(times, 2 * epsilon)
-    else:
-        left, right = np.maximum(0.0, times - epsilon), np.minimum(duration, times + epsilon)
-        span = right - left
-    a, b = keyframes.sample(robot, left), keyframes.sample(robot, right)
-    velocity = np.stack([robot.difference(p, q, float(dt)) for p, q, dt in zip(a, b, span, strict=True)])
-    if robot.floating:
-        # mj_differentiatePos 的角速度在左采样点的轴下，转换到节点的局部轴。
-        to_node = rotation_from_wxyz(initial[:, 3:7]).inv() * rotation_from_wxyz(a[:, 3:7])
-        velocity[:, 3:6] = to_node.apply(velocity[:, 3:6])
-    return velocity
-
-
-def _add_frame_tasks(
-    prepared: _PreparedTrajectory, robot: Robot, project: Project, keyframes: ReferenceTrajectory
-) -> None:
-    if not project.uses_frame_tasks:
-        return
+def _add_frame_tasks(prepared: _PreparedTrajectory, project: Project, keyframes: ReferenceTrajectory) -> None:
     settings, problem, times = project.settings, prepared.problem, prepared.times
+    if max(settings.frame_reference, settings.frame_velocity, settings.frame_acceleration) <= 0:
+        return
 
     for name, task in project.frame_tasks.items():
         if task.mode is None or task.weight <= 0:
             continue
-        frame = TaskFrame(robot, name, task.reference_body)
+        frame = ControlFrameKinematics(prepared.layout.robot, name, task.reference_body)
         if settings.frame_reference > 0:
-            targets = TaskReference(frame, keyframes).sample(times)
+            targets = sample_frame_reference(frame, keyframes, times, task.mode)
             weight = float(np.sqrt(task.weight * settings.frame_reference / len(times)))
             for node, target in zip(prepared.nodes, targets, strict=True):
                 if not node.locked:
-                    problem.add_residual_block(FrameReferenceCost(frame, task.mode, target, weight), None, node.pose)
-        _add_motion_costs(
+                    problem.add_residual_block(
+                        FrameReferenceCost(prepared.layout, frame, target, weight), None, node.pose
+                    )
+        _add_smoothness_costs(
             prepared,
             settings.frame_velocity,
             settings.frame_acceleration,
@@ -158,8 +135,8 @@ def _add_frame_tasks(
 
 
 def _solve_node_times(project: Project) -> FloatArray:
-    # 动作首尾及所有关键帧作为分段边界，保留作者给出的准确时间。
-    boundaries = np.unique([0.0, project.duration, *(key.time for key in project.keyframes)])
+    # 每个关键帧都作为分段边界，保留作者给出的准确时间。
+    boundaries = np.asarray(sorted(key.time for key in project.keyframes), dtype=float)
     # 沿用规则网格插入关键帧后的节点预算，几乎重合的规则节点只计一次。
     regular_count = max(2, int(np.ceil(project.duration * project.settings.solve_fps)) + 1)
     regular = np.linspace(0.0, project.duration, regular_count)
@@ -184,26 +161,26 @@ def _solve_node_times(project: Project) -> FloatArray:
     return np.concatenate(parts)
 
 
-def _prepare(robot: Robot, project: Project) -> _PreparedTrajectory:
-    settings = project.settings
-    times = _solve_node_times(project)
-    loop = settings.terminal_condition == "loop"
-    # 循环区间的两个端点必须引用不同节点。
-    if loop and len(times) == 2:
-        times = np.insert(times, 1, project.duration / 2)
+def _build_nodes(
+    robot: Robot, project: Project, keyframes: ReferenceTrajectory, times: FloatArray, key_indices: dict[str, int]
+) -> _PreparedTrajectory:
+    loop = project.settings.terminal_condition != "rest"
+    translation_loop = keyframes.terminal_condition == "translation_loop"
     # 逐关节插值只初始化优化变量，不作为整段轨迹的姿态跟随目标。
-    keyframes = project.keyframe_trajectory(robot)
-    initial = keyframes.sample(robot, times)
+    initial, velocities = keyframes.sample_state(robot, times)
     count = len(times)
-    key_indices = {key.id: int(np.argmin(abs(times - key.time))) for key in project.keyframes}
     fixed = {key_indices[key.id] for key in project.keyframes if key.locked}
     stops = {key_indices[key.id] for key in project.keyframes if key.zero_velocity}
     for key in project.keyframes:
         if key.locked:
             initial[key_indices[key.id]] = key.qpos
     if loop:
-        initial[0] = initial[-1] = keyframes.qpos[0]
-        if count - 1 in fixed:
+        shared = slice(2, None) if translation_loop else slice(None)
+        initial[[0, -1], shared] = keyframes.qpos[0, shared]
+        if translation_loop:
+            # 两端从各自的水平曲线取速度，以两者的均值初始化共享速度。
+            velocities[0, :2] = (velocities[0, :2] + velocities[-1, :2]) / 2
+        if not translation_loop and count - 1 in fixed:
             fixed.add(0)
         if count - 1 in stops:
             stops.add(0)
@@ -215,40 +192,33 @@ def _prepare(robot: Robot, project: Project) -> _PreparedTrajectory:
     layout = PoseLayout(robot)
     nodes: list[_SolveNode] = []
     steps = np.diff(times)
-    velocities = (
-        _initial_velocity(robot, keyframes, times, initial, loop=loop) if robot.model.nv else np.empty((count, 0))
-    )
-    quaternion_manifold = pyceres.QuaternionManifold()
     for index in range(count - int(loop)):
-        pose = layout.pack(initial[index])
-        if robot.joint_names:
-            joints = pose[0]
-            problem.add_parameter_block(joints, len(robot.joint_names))
-            for joint, (lower, upper) in enumerate(zip(robot.lower, robot.upper, strict=True)):
-                if np.isfinite(lower):
-                    problem.set_parameter_lower_bound(joints, joint, float(lower))
-                if np.isfinite(upper):
-                    problem.set_parameter_upper_bound(joints, joint, float(upper))
-        if robot.floating:
-            problem.add_parameter_block(pose[-2], 3)
-            problem.add_parameter_block(pose[-1], 4, quaternion_manifold)
         locked = index in fixed
-        if locked:
-            for block in pose:
-                problem.set_parameter_block_constant(block)
+        pose = layout.add_blocks(problem, initial[index], locked=locked)
 
         incoming = float(steps[index - 1]) if index > 0 or loop else None
         outgoing = float(steps[index]) if index < len(steps) else None
-        mapping = KnotVelocity(robot, incoming, outgoing, stopped=index in stops)
+        mapping = KnotVelocityMap(robot, incoming, outgoing, stopped=index in stops)
         velocity = mapping.add_block(problem, initial[index], velocities[index])
         nodes.append(_SolveNode(pose, locked, mapping, velocity))
     if loop:
-        # 末时刻引用首节点的姿态、速度与锁定状态。
-        nodes.append(nodes[0])
-    prepared = _PreparedTrajectory(times, nodes, layout, problem)
-    # 全部节点的姿态和速度均已固定时，直接生成轨迹。
-    if robot.model.nv == 0 or all(node.fixed for node in nodes):
-        return prepared
+        first = nodes[0]
+        if translation_loop:
+            locked = count - 1 in fixed
+            pose = layout.add_translated_endpoint(problem, first.pose, initial[-1, :2], locked=locked)
+            nodes.append(_SolveNode(pose, locked, first.velocity_mapping, first.velocity))
+        else:
+            # 原地循环的末时刻引用首节点的姿态、速度与锁定状态。
+            nodes.append(first)
+    return _PreparedTrajectory(times, nodes, layout, problem)
+
+
+def _add_costs(
+    prepared: _PreparedTrajectory, project: Project, keyframes: ReferenceTrajectory, key_indices: dict[str, int]
+) -> None:
+    layout, nodes, problem = prepared.layout, prepared.nodes, prepared.problem
+    settings, robot = project.settings, layout.robot
+    count = len(nodes)
 
     # 姿态偏好仅来自作者显式给出的未锁定关键帧，并只作用于对应时刻。
     for key in project.keyframes:
@@ -258,33 +228,49 @@ def _prepare(robot: Robot, project: Project) -> _PreparedTrajectory:
         weight = float(np.sqrt(settings.keyframe))
         target = layout.pack(np.asarray(key.qpos))
         linear = len(target) - int(robot.floating)
+        # 平移循环的另一端可以锁定共享参数块，本端只为仍可调整的量添加偏好。
         for goal, block in zip(target[:linear], node.pose[:linear], strict=True):
-            problem.add_residual_block(LinearReferenceCost(goal, weight), None, [block])
-        if robot.floating:
+            if not problem.is_parameter_block_constant(block):
+                problem.add_residual_block(LinearReferenceCost(goal, weight), None, [block])
+        if robot.floating and not problem.is_parameter_block_constant(node.pose[-1]):
             problem.add_residual_block(RotationReferenceCost(target[-1], weight), None, [node.pose[-1]])
 
-    _add_motion_costs(prepared, settings.velocity, settings.acceleration)
-    environment = robot.environment
-    free = [(index, node) for index, node in enumerate(nodes) if not node.locked]
+    _add_smoothness_costs(prepared, settings.velocity, settings.acceleration)
+    free = [node for node in nodes if not node.locked]
     if settings.foot_support and (
         settings.support_position > 0 or settings.support_orientation > 0 or settings.balance > 0
     ):
-        data = robot.forward(initial[0])
-        for index, node in free:
-            robot.forward(initial[index], data)
-            contacts = detect_support_contacts(foot_contacts(robot, data), nearest=True)
-            problem.add_residual_block(SupportCost(robot, contacts, settings, count), None, node.pose)
-    if environment.collision_pairs and (settings.self_collision > 0 or settings.ground_collision > 0):
-        weights = np.sqrt(
-            np.where(environment.ground_collision_mask, settings.ground_collision, settings.self_collision) / count
-        )
-        for _, node in free:
-            problem.add_residual_block(
-                CollisionCost(robot, weights, margin_cm=settings.collision_margin_cm),
-                None,
-                node.pose,
+        data = None
+        for node in free:
+            data = robot.forward(layout.unpack(node.pose), data)
+            contacts = initial_support_contacts(robot, data)
+            problem.add_residual_block(SupportCost(layout, contacts, settings, count), None, node.pose)
+    if free and (settings.self_collision > 0 or settings.ground_collision > 0):
+        collision = collision_model_for(robot)
+        if collision.collision_pairs.size:
+            weights = np.sqrt(
+                np.where(collision.ground_collision_mask, settings.ground_collision, settings.self_collision) / count
             )
-    _add_frame_tasks(prepared, robot, project, keyframes)
+            for node in free:
+                problem.add_residual_block(
+                    CollisionCost(layout, collision, weights, margin_cm=settings.collision_margin_cm),
+                    None,
+                    node.pose,
+                )
+    _add_frame_tasks(prepared, project, keyframes)
+
+
+def _prepare(robot: Robot, project: Project) -> _PreparedTrajectory:
+    times = _solve_node_times(project)
+    # 区间两端不能在同一个代价中重复引用循环共享的参数块。
+    if project.settings.terminal_condition != "rest" and len(times) == 2:
+        times = np.insert(times, 1, project.duration / 2)
+    keyframes = project.keyframe_trajectory(robot)
+    key_indices = {key.id: int(np.argmin(abs(times - key.time))) for key in project.keyframes}
+    prepared = _build_nodes(robot, project, keyframes, times, key_indices)
+    # 全部节点的姿态和速度均已固定时，直接生成轨迹。
+    if robot.model.nv and not all(node.fixed for node in prepared.nodes):
+        _add_costs(prepared, project, keyframes, key_indices)
     return prepared
 
 

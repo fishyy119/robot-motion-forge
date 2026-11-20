@@ -12,6 +12,7 @@ dependencies = [
   "json5>=0.12,<1",
   "pydantic>=2.12,<3",
   "numpy>=1.26,<3",
+  "jaxtyping>=0.3.11,<0.4",
   "scipy>=1.18,<1.19",
   "mujoco>=3.17,<3.18",
   "mink>=1.2,<2",
@@ -33,7 +34,7 @@ dev = [
 ]
 
 [project.scripts]
-robot-motion-forge = "robot_motion_forge.application.cli:main"
+robot-motion-forge = "robot_motion_forge.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/robot_motion_forge"]

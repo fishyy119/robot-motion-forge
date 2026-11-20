@@ -6,7 +6,8 @@ from collections.abc import Callable
 from functools import partial
 from typing import TYPE_CHECKING, NamedTuple, Protocol
 
-from robot_motion_forge.motion.types import FrameTask, TerminalCondition
+from robot_motion_forge.motion.project import FrameTask
+from robot_motion_forge.motion.types import TerminalCondition
 from robot_motion_forge.robot.definition import ControlMode
 
 from ..controls import CONTROL_MODES
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
 _SUPPORT_FIELDS = ("support_position", "support_orientation", "balance", "support_margin_cm")
 _FRAME_FIELDS = ("frame_reference", "frame_velocity", "frame_acceleration")
 _TASK_MODES: dict[str, ControlMode | None] = {"禁用": None, **CONTROL_MODES}
-_TERMINAL_LABELS: dict[TerminalCondition, str] = {"rest": "静止", "loop": "循环"}
+_TERMINAL_LABELS: dict[TerminalCondition, str] = {"rest": "静止", "loop": "循环", "translation_loop": "平移循环"}
 
 
 class _SliderConfig(NamedTuple):
@@ -44,8 +45,6 @@ class SolveActions(Protocol):
     def cancel(self) -> None: ...
     def export(self, client: ClientHandle) -> None: ...
     def set_timing(self, *, duration: float | None = None, fps: float | None = None) -> None: ...
-    def set_frame_task(self, name: str, task: FrameTask) -> None: ...
-    def set_setting(self, name: str, value: float | int | str) -> None: ...
 
 
 class SolveTab:
@@ -75,8 +74,8 @@ class SolveTab:
                 "self_collision": _SliderConfig(label="自碰撞权重", min=0.0, max=10.0, step=0.1, precision=3),
                 "ground_collision": _SliderConfig(label="地面碰撞权重", min=0.0, max=10.0, step=0.1, precision=3),
                 "collision_margin_cm": _SliderConfig(label="自碰撞间隙 / cm", min=0.0, max=5.0, step=0.1, precision=2),
-                "support_position": _SliderConfig(label="足底贴地权重", min=0.0, max=10.0, step=0.1, precision=3),
-                "support_orientation": _SliderConfig(label="足底水平权重", min=0.0, max=10.0, step=0.1, precision=3),
+                "support_position": _SliderConfig(label="支撑足贴地权重", min=0.0, max=10.0, step=0.1, precision=3),
+                "support_orientation": _SliderConfig(label="支撑足水平权重", min=0.0, max=10.0, step=0.1, precision=3),
                 "balance": _SliderConfig(label="重心支撑权重", min=0.0, max=10.0, step=0.1, precision=3),
                 "support_margin_cm": _SliderConfig(label="支撑裕量 / cm", min=0.0, max=5.0, step=0.1, precision=2),
                 "frame_reference": _SliderConfig(label="坐标系轨迹跟随", min=0.0, max=10.0, step=0.1, precision=3),
@@ -136,17 +135,23 @@ class SolveTab:
                     weight.precision = 3
                     self._task_inputs[name] = _TaskInputs(mode, reference, weight)
 
-    def bind_actions(self, actions: SolveActions) -> None:
+    def bind_actions(
+        self,
+        actions: SolveActions,
+        *,
+        set_setting: Callable[[str, float | int | str], None],
+        set_frame_task: Callable[[str, FrameTask], None],
+    ) -> None:
         controls = self._controls
         controls.input(self._duration, lambda value: actions.set_timing(duration=value))
         controls.input(self._fps, lambda value: actions.set_timing(fps=value))
         controls.input(
             self._terminal_condition,
-            lambda label: actions.set_setting(
+            lambda label: set_setting(
                 "terminal_condition", next(condition for condition, text in _TERMINAL_LABELS.items() if text == label)
             ),
         )
-        controls.input(self._foot_support, lambda value: actions.set_setting("foot_support", value))
+        controls.input(self._foot_support, lambda value: set_setting("foot_support", value))
         controls.click(self._solve_button, actions.start)
         controls.click(self._cancel_button, actions.cancel)
 
@@ -157,7 +162,7 @@ class SolveTab:
         self._export_button.on_click(controls.client_action(prepare_export))
 
         for field, handle in self._setting_inputs.items():
-            controls.input(handle, lambda value, field=field: actions.set_setting(field, value))
+            controls.input(handle, lambda value, field=field: set_setting(field, value))
 
         reference_bodies = {label: body for body, label in self._reference_labels.items()}
 
@@ -169,7 +174,7 @@ class SolveTab:
                 reference_body=reference_bodies[inputs.reference.value],
                 weight=inputs.weight.value,
             )
-            return partial(actions.set_frame_task, name, task)
+            return partial(set_frame_task, name, task)
 
         for name, inputs in self._task_inputs.items():
             for handle in inputs:

@@ -5,9 +5,10 @@ from typing import Literal, Self
 
 import numpy as np
 
-from robot_motion_forge.robot.model import FloatArray, Robot
+from robot_motion_forge.robot.model import Robot
+from robot_motion_forge.utils.array_types import FloatArray
 
-from .constraints import EditConstraints
+from .pose_constraints import EditConstraints
 from .project import Project
 
 type PoseSource = Literal["previous_keyframe", "trajectory"]

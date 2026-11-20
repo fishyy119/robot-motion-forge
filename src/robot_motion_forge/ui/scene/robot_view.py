@@ -2,32 +2,35 @@
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 import mujoco as mj
 import numpy as np
 from numpy.typing import ArrayLike
 
-from robot_motion_forge.robot.environment import GROUND_HEIGHT_M
+from robot_motion_forge.robot import GROUND_HEIGHT_M
 from robot_motion_forge.robot.model import Robot
 from robot_motion_forge.robot.support import (
-    BALANCE_TOLERANCE_M,
     build_support_region,
     detect_support_contacts,
-    foot_contacts,
+    foot_states,
 )
 
+from ..controls import PoseSelection
+from ..theme import accent_color, locked_color, robot_color, warning_color
+from ..viser_bridge import json_for_script
 from .geometry import add_geom
-from .theme import accent_color, locked_color, robot_color, warning_color
 
 if TYPE_CHECKING:
     from viser import FrameHandle, GuiHtmlHandle, IcosphereHandle, ViserServer
 
-    from robot_motion_forge.motion.constraints import EditConstraints
+    from robot_motion_forge.motion.pose_constraints import EditConstraints
     from robot_motion_forge.robot.definition import ControlMode
 
     from .geometry import GeometryHandle
+
+
+BALANCE_TOLERANCE_M = 0.001
 
 
 class RobotView:
@@ -45,7 +48,7 @@ class RobotView:
         self._robot_color = robot_color(True)
         self._locked_color = locked_color(True)
         self._warning_color = warning_color(True)
-        self._body_joints = {body: robot.selectable_joints(body) for body in robot.body_ids}
+        self._body_joints = {body: self._selectable_joints(body) for body in robot.body_ids}
         m = robot.model
         server.scene.set_up_direction("+z")
         # 网格略低于物理地面，避免零高度接触点与网格重叠。
@@ -114,48 +117,70 @@ class RobotView:
             thickness=2.0,
             thickness_units="screen",
         )
-        self._hover_labels: dict[str, str] = {}
+        self._hover_labels = self._constraint_labels()
         self.bind_gui()
-        self._update_joint_colors()
+        self._update_colors()
+
+    def _selectable_joints(self, body: int) -> tuple[str, ...]:
+        """网格归属最近的上游活动关节，刚性附属连杆不成为独立操作对象。"""
+        robot, model = self.robot, self.robot.model
+        while body:
+            joints = tuple(
+                name
+                for joint, name in zip(robot.joint_ids, robot.joint_names, strict=True)
+                if model.jnt_bodyid[joint] == body
+            )
+            if joints:
+                return joints
+            body = int(model.body_parentid[body])
+        return ()
 
     def bind_gui(self) -> None:
         """界面重建时重新挂载提示数据，保留静态场景节点。"""
         self._hover_metadata: GuiHtmlHandle = self.server.gui.add_html("")
         self._publish_hover_labels()
 
-    def set_control_hint(self, text: str) -> None:
-        if self._hover_labels.get("/target") == text:
+    def scene_body_joints(self) -> dict[str, tuple[str, ...]]:
+        return {self.frames[body].name: joints[::-1] for body, joints in self._body_joints.items()}
+
+    def scene_frame_paths(self) -> dict[str, str]:
+        return {name: marker.name for name, marker in self.markers.items()}
+
+    def set_control_hint(self, path: str, text: str) -> None:
+        if self._hover_labels.get(path) == text:
             return
-        self._hover_labels["/target"] = text
+        self._hover_labels[path] = text
         self._publish_hover_labels()
 
     def _publish_hover_labels(self) -> None:
         # 原生 GUI 状态只保留最新名称，避免切换选择时积累可重放的 JavaScript 消息。
-        labels = json.dumps(self._hover_labels, ensure_ascii=False).replace("<", "\\u003c")
+        labels = json_for_script(self._hover_labels, ensure_ascii=False)
         self._hover_metadata.content = f'<script type="application/json" data-rmf-scene-labels>{labels}</script>'
 
-    def _update_joint_colors(self) -> None:
+    def _constraint_labels(self) -> dict[str, str]:
         mode_labels = {"position": "位置", "orientation": "朝向", "pose": "位姿"}
+        labels: dict[str, str] = {}
         for name, marker in self.markers.items():
             mode = self._anchors.get(name)
-            marker.color = self._warning_color if mode is not None else self._support_color
-            self._hover_labels[f"/frames/{name}"] = f"控制坐标系 · {name}" + (
-                f" · 固定{mode_labels[mode]}" if mode is not None else ""
+            labels[marker.name] = f"控制坐标系 · {name}" + (f" · 固定{mode_labels[mode]}" if mode is not None else "")
+        for body, joints in self._body_joints.items():
+            # 同一刚体上的多个自由度共用网格，分别列出关节状态。
+            labels[self.frames[body].name] = "\n".join(
+                f"关节 · {name}" + (" · 已锁定" if name in self._locked_joints else "") for name in reversed(joints)
             )
+        return labels
+
+    def _update_colors(self) -> None:
+        for name, marker in self.markers.items():
+            marker.color = self._warning_color if name in self._anchors else self._support_color
         for geom, handle in self._visual_geometries.items():
             joints = self._body_joints[int(self.robot.model.geom_bodyid[geom])]
             handle.color = self._locked_color if self._locked_joints.intersection(joints) else self._robot_color
         if self._collision_visible:
             for handle in self._collision_geometries.values():
                 handle.color = self._warning_color
-        for body, joints in self._body_joints.items():
-            # 同一刚体上的多个自由度共用网格，分别列出关节状态。
-            self._hover_labels[f"/b{body}"] = "\n".join(
-                f"关节 · {name}" + (" · 已锁定" if name in self._locked_joints else "") for name in reversed(joints)
-            )
-        self._publish_hover_labels()
 
-    def pick(self, ray_origin: ArrayLike, ray_direction: ArrayLike) -> str | None:
+    def pick(self, ray_origin: ArrayLike, ray_direction: ArrayLike) -> PoseSelection | None:
         """先拾取坐标系标记，再拾取本体，与前端的标记优先级保持一致。"""
         m = self.robot.model
         origin = np.asarray(ray_origin, dtype=float)
@@ -176,7 +201,7 @@ class RobotView:
             if 0 <= distance < nearest:
                 nearest, frame = distance, name
         if frame is not None:
-            return frame
+            return PoseSelection("frame", frame)
         nearest, selected = np.inf, None
         for geom, handle in self._geometries.items():
             opacity = handle.opacity
@@ -199,7 +224,7 @@ class RobotView:
             return None
         joints = self._body_joints[int(m.geom_bodyid[selected])]
         # 同体串联的多个自由度默认拾取最末关节，其余关节可从操作对象中单独选择。
-        return f"joint:{joints[-1]}" if joints else None
+        return PoseSelection("joint", joints[-1]) if joints else None
 
     def set_theme(self, *, dark_mode: bool) -> None:
         self.grid.cell_color = (58, 70, 85) if dark_mode else (216, 224, 232)
@@ -209,24 +234,28 @@ class RobotView:
         self._warning_color = warning_color(dark_mode)
         self._support_color = accent_color(dark_mode)
         self._com.color = self._support_color
-        self._update_joint_colors()
+        self._update_colors()
 
-    def update(self, qpos: ArrayLike, constraints: EditConstraints) -> None:
+    def update_pose(self, qpos: ArrayLike) -> None:
         self.robot.forward(qpos, self.data)
         with self.server.atomic():
             for body, frame in self.frames.items():
                 frame.position = self.data.xpos[body]
                 frame.wxyz = self.data.xquat[body]
             for name, marker in self.markers.items():
-                position, orientation = self.robot.pose(self.data, name)
+                position, orientation = self.robot.frame_pose(self.data, name)
                 marker.position = position
                 marker.wxyz = orientation
-            current = frozenset(constraints.locked_joints)
-            anchors: dict[str, ControlMode] = {name: anchor.mode for name, anchor in constraints.anchors.items()}
-            if current != self._locked_joints or anchors != self._anchors:
-                self._locked_joints = current
-                self._anchors = anchors
-                self._update_joint_colors()
+
+    def update_constraints(self, constraints: EditConstraints) -> None:
+        locked_joints = frozenset(constraints.locked_joints)
+        anchors: dict[str, ControlMode] = {name: anchor.mode for name, anchor in constraints.anchors.items()}
+        if locked_joints == self._locked_joints and anchors == self._anchors:
+            return
+        self._locked_joints, self._anchors = locked_joints, anchors
+        self._update_colors()
+        self._hover_labels.update(self._constraint_labels())
+        self._publish_hover_labels()
 
     def show_collisions(self, visible: bool) -> None:
         self._collision_visible = visible
@@ -237,16 +266,17 @@ class RobotView:
                     handle.opacity = 1.0
                 elif geom in self._visual_opacities:
                     handle.opacity = self._visual_opacities[geom]
-            self._update_joint_colors()
+            self._update_colors()
 
     def update_support(self, *, show_center_of_mass: bool, show_support: bool, margin_cm: float) -> None:
         contacts = (
-            detect_support_contacts(foot_contacts(self.robot, self.data)) if show_center_of_mass or show_support else ()
+            detect_support_contacts(foot_states(self.robot, self.data)) if show_center_of_mass or show_support else ()
         )
         region = build_support_region(contacts)
         com = self.robot.center_of_mass(self.data)
         projection = np.array([com[0], com[1], GROUND_HEIGHT_M + 0.002])
-        valid = region is not None and region.margin(com[:2]) >= margin_cm / 100.0 - BALANCE_TOLERANCE_M
+        minimum_margin = margin_cm / 100.0 - BALANCE_TOLERANCE_M
+        valid = region is not None and float(region.edge_margins(com[:2]).min()) >= minimum_margin
         color = self._support_color if valid else self._warning_color
         with self.server.atomic():
             self._com.position = com

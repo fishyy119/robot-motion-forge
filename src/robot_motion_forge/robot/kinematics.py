@@ -1,14 +1,28 @@
-"""控制坐标系相对世界或指定连杆的位姿，以及相同参考系中的运动学雅可比。"""
+"""MuJoCo 正向运动学，以及控制坐标系的位姿和雅可比。"""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import mujoco as mj
 import numpy as np
+from numpy.typing import ArrayLike
 from scipy.spatial.transform import Rotation
 
-from robot_motion_forge.rotations import rotation_from_wxyz
+from robot_motion_forge.utils.array_types import FloatArray
+from robot_motion_forge.utils.rotations import rotation_from_wxyz, skew
 
-from .model import FloatArray, Robot
+if TYPE_CHECKING:
+    from .model import Robot
+
+
+def forward_kinematics(model: mj.MjModel, qpos: ArrayLike, data: mj.MjData | None = None) -> mj.MjData:
+    state = mj.MjData(model) if data is None else data
+    state.qpos[:] = qpos
+    mj.mj_kinematics(model, state)
+    mj.mj_comPos(model, state)
+    return state
 
 
 @dataclass(frozen=True)
@@ -19,7 +33,7 @@ class FrameState:
     jacobian: FloatArray | None = None
 
 
-class TaskFrame:
+class ControlFrameKinematics:
     def __init__(self, robot: Robot, name: str, reference_body: str | None) -> None:
         self.robot = robot
         self.site = robot.frame_site_ids[name]
@@ -47,3 +61,21 @@ class TaskFrame:
                 derivative[:3] = matrix @ (derivative[:3] - bp - np.cross(br.T, offset).T)
                 derivative[3:] = matrix @ (derivative[3:] - br)
         return FrameState(position, orientation, derivative)
+
+    def velocity_pose_jacobian(self, pose: FloatArray, velocity: FloatArray, jacobian: FloatArray) -> FloatArray:
+        """在广义速度固定时，对姿态求 J(q)v 的导数。"""
+        if not np.any(velocity):
+            return np.zeros_like(jacobian)
+        # 交换混合偏导，只沿 v 做一次中心差分。基座右增量与任务空间角速度
+        # 的坐标轴随姿态转动，交换时分别加上输入和输出的李括号项。
+        step = 1e-5 / max(1.0, float(np.linalg.norm(velocity, ord=np.inf)))
+        offset = step * velocity
+        robot = self.robot
+        plus = self.state(robot.integrate(pose, offset), jacobian=True).jacobian
+        minus = self.state(robot.integrate(pose, -offset), jacobian=True).jacobian
+        assert plus is not None and minus is not None
+        derivative = (plus - minus) / (2 * step)
+        if robot.floating:
+            derivative[:, 3:6] -= jacobian[:, 3:6] @ skew(velocity[3:6])
+        derivative[3:] -= skew(jacobian[3:] @ velocity) @ jacobian[3:]
+        return derivative

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Coroutine, Mapping
 from functools import partial
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
 
 if TYPE_CHECKING:
     from viser import (
@@ -20,6 +20,11 @@ if TYPE_CHECKING:
     from robot_motion_forge.robot.model import Robot
 
 CONTROL_MODES: dict[str, ControlMode] = {"位置": "position", "朝向": "orientation", "位姿": "pose"}
+
+
+class PoseSelection(NamedTuple):
+    kind: Literal["frame", "joint"]
+    name: str
 
 
 def grouped_joint_names(robot: Robot) -> dict[str, list[str]]:

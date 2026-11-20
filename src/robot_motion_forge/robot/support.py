@@ -7,16 +7,17 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.spatial import ConvexHull, QhullError
 
-from .environment import GROUND_HEIGHT_M
-from .model import FloatArray, Robot
+from robot_motion_forge.utils.array_types import FloatArray
+
+from . import GROUND_HEIGHT_M
+from .model import Robot
 
 CONTACT_POSITION_TOLERANCE_M = 0.01
 CONTACT_ROTATION_TOLERANCE_RAD = np.deg2rad(5.0)
-BALANCE_TOLERANCE_M = 0.001
 
 
 @dataclass(frozen=True)
-class FootContact:
+class FootState:
     name: str
     vertices_m: FloatArray
     normal: FloatArray
@@ -30,34 +31,29 @@ class FootContact:
         return float(np.arccos(np.clip(abs(self.normal[2]), 0.0, 1.0)))
 
 
-def foot_contacts(robot: Robot, data: mj.MjData, *, names: tuple[str, ...] | None = None) -> tuple[FootContact, ...]:
-    contacts: list[FootContact] = []
+def foot_states(robot: Robot, data: mj.MjData, *, names: tuple[str, ...] | None = None) -> tuple[FootState, ...]:
+    feet: list[FootState] = []
     for name, polygon in robot.support_polygons.items():
         if names is not None and name not in names:
             continue
         site = polygon.site_id
         position = data.site_xpos[site, :]
         matrix = data.site_xmat[site, :].reshape(3, 3)
-        contacts.append(FootContact(name, position + polygon.vertices_m @ matrix.T, matrix @ polygon.normal))
-    return tuple(contacts)
+        feet.append(FootState(name, position + polygon.vertices_m @ matrix.T, matrix @ polygon.normal))
+    return tuple(feet)
 
 
-def detect_support_contacts(contacts: tuple[FootContact, ...], *, nearest: bool = False) -> tuple[FootContact, ...]:
-    grounded = tuple(
-        contact
-        for contact in contacts
-        if contact.height_m <= CONTACT_POSITION_TOLERANCE_M and contact.tilt_rad <= CONTACT_ROTATION_TOLERANCE_RAD
+def detect_support_contacts(feet: tuple[FootState, ...]) -> tuple[FootState, ...]:
+    return tuple(
+        foot
+        for foot in feet
+        if foot.height_m <= CONTACT_POSITION_TOLERANCE_M and foot.tilt_rad <= CONTACT_ROTATION_TOLERANCE_RAD
     )
-    if grounded or not nearest or not contacts:
-        return grounded
-    # 求解初值未贴地时，以最接近地面的足部为修正对象；显示仍只使用真实贴地的足部。
-    closest = min(contact.height_m for contact in contacts)
-    return tuple(contact for contact in contacts if contact.height_m <= closest + CONTACT_POSITION_TOLERANCE_M)
 
 
 @dataclass(frozen=True)
 class SupportRegion:
-    contacts: tuple[FootContact, ...]
+    contacts: tuple[FootState, ...]
     points_m: FloatArray
     hull_indices: NDArray[np.intp]
     normals: FloatArray
@@ -69,11 +65,11 @@ class SupportRegion:
         vertices[:, 2] = GROUND_HEIGHT_M
         return vertices
 
-    def margin(self, com_xy: FloatArray) -> float:
-        return float(np.min(self.bounds - self.normals @ com_xy))
+    def edge_margins(self, com_xy: FloatArray) -> FloatArray:
+        return self.bounds - self.normals @ com_xy
 
 
-def build_support_region(contacts: tuple[FootContact, ...]) -> SupportRegion | None:
+def build_support_region(contacts: tuple[FootState, ...]) -> SupportRegion | None:
     if not contacts:
         return None
     points = np.concatenate([contact.vertices_m for contact in contacts])

@@ -9,16 +9,15 @@ from time import monotonic
 import numpy as np
 from numpy.typing import ArrayLike
 
-from robot_motion_forge.io.project import load_project, save_project
-from robot_motion_forge.motion.constraints import EditConstraints
+from robot_motion_forge.io.project_file import load_project, save_project
 from robot_motion_forge.motion.draft import Draft, PoseSource
-from robot_motion_forge.motion.project import Project
+from robot_motion_forge.motion.pose_constraints import EditConstraints, PoseTarget
+from robot_motion_forge.motion.project import FrameTask, Keyframe, Project, SolverSettings
 from robot_motion_forge.motion.trajectory import ReferenceTrajectory, SolvedTrajectory, validate_trajectory
-from robot_motion_forge.motion.types import FrameTask, Keyframe, PoseTarget, SolverSettings
 from robot_motion_forge.robot.definition import ControlMode
-from robot_motion_forge.robot.model import FloatArray, Robot
+from robot_motion_forge.robot.model import Robot
 from robot_motion_forge.solvers.drag import DragResult, follow_target
-from robot_motion_forge.solvers.ik import IKResult, solve_ik
+from robot_motion_forge.utils.array_types import FloatArray
 
 
 @dataclass(frozen=True)
@@ -37,13 +36,20 @@ class Editor:
         *,
         draft: Draft | None = None,
     ) -> None:
-        self.robot = robot
         project = (project or Project.new(robot)).normalized(robot)
         initial_draft = deepcopy(draft) if draft is not None else Draft.initial(robot)
         initial_draft.validate(robot, project)
-        self._state = _EditState(project, initial_draft, project.solve_fingerprint())
         if trajectory is not None:
             validate_trajectory(robot, project.duration, trajectory)
+        self._initialize_state(robot, project, initial_draft, trajectory)
+        if draft is None:
+            self.scrub(initial_draft.cursor)
+
+    def _initialize_state(
+        self, robot: Robot, project: Project, draft: Draft, trajectory: SolvedTrajectory | None
+    ) -> None:
+        self.robot = robot
+        self._state = _EditState(project, draft, project.solve_fingerprint())
         self._trajectory = trajectory
         self._reference: ReferenceTrajectory | None = None
         self._undo: list[_EditState] = []
@@ -53,13 +59,14 @@ class Editor:
         self.revision = 0
         self.project_revision = 0
         self.draft_revision = 0
-        if draft is None:
-            self.scrub(initial_draft.cursor)
 
     @classmethod
     def load(cls, robot: Robot, path: Path) -> "Editor":
         project, draft, trajectory = load_project(path, robot)
-        return cls(robot, project, trajectory, draft=draft)
+        # 文件加载已校验状态，新会话直接接管这些对象。
+        editor = cls.__new__(cls)
+        editor._initialize_state(robot, project, draft, trajectory)
+        return editor
 
     def project_snapshot(self) -> Project:
         return self._state.project.model_copy(deep=True)
@@ -79,11 +86,7 @@ class Editor:
     def trajectory(self) -> SolvedTrajectory | None:
         return self._trajectory
 
-    @property
-    def constraints(self) -> EditConstraints:
-        return self._state.draft.constraints.model_copy(deep=True)
-
-    def edit(self, operation: Callable[[Project, Draft], None], *, merge_key: tuple[str, str] | None = None) -> None:
+    def _edit(self, operation: Callable[[Project, Draft], None], *, merge_key: tuple[str, str] | None = None) -> None:
         # 已提交工程只读；历史保留旧状态，候选修改在独立副本上执行。
         old = self._state
         candidate, draft = deepcopy(old.project), deepcopy(old.draft)
@@ -159,7 +162,7 @@ class Editor:
         self.revision += 1
         return True
 
-    def reference_trajectory(self) -> ReferenceTrajectory:
+    def _reference_trajectory(self) -> ReferenceTrajectory:
         if self._reference is None:
             self._reference = self._state.project.keyframe_trajectory(self.robot, preview=True)
         return self._reference
@@ -167,7 +170,7 @@ class Editor:
     def seek(self, time: float) -> None:
         """定位到连续轨迹，供播放与轨迹取姿使用。"""
         time = float(np.clip(time, 0, self._state.project.duration))
-        trajectory = self.trajectory or self.reference_trajectory()
+        trajectory = self.trajectory or self._reference_trajectory()
         self._move_cursor(time, trajectory.sample(self.robot, [time])[0])
 
     def _move_cursor(
@@ -185,7 +188,7 @@ class Editor:
         """按工程终端条件推进游标并采样，返回是否继续播放。"""
         project = self._state.project
         time = self._state.draft.cursor + elapsed
-        if project.settings.terminal_condition == "loop":
+        if project.settings.terminal_condition != "rest":
             time %= project.duration
         self.seek(time)
         return time < project.duration
@@ -202,18 +205,13 @@ class Editor:
             self.scrub(draft.cursor)
 
     def _previous_key(self, time: float) -> Keyframe:
-        keys = self._state.project.keyframes
-        return max(
-            (key for key in keys if key.time <= time),
-            key=lambda key: key.time,
-            default=min(keys, key=lambda key: key.time),
-        )
+        return max((key for key in self._state.project.keyframes if key.time <= time), key=lambda key: key.time)
 
-    def scrub(self, time: float, *, snap_tolerance: float = 0.0) -> None:
+    def scrub(self, time: float) -> None:
         time = float(np.clip(time, 0, self._state.project.duration))
         key = min(self._state.project.keyframes, key=lambda key: (abs(key.time - time), key.time))
         # 滑块按步长取整，命中后吸附到关键帧的准确时刻；轨迹取样始终作为独立草稿。
-        snapped = abs(key.time - time) <= snap_tolerance + 1e-8
+        snapped = abs(key.time - time) <= 1e-8
         if self.pose_source == "trajectory":
             self.seek(key.time if snapped else time)
             return
@@ -227,13 +225,17 @@ class Editor:
     def set_timing(self, duration: float | None = None, fps: float | None = None) -> None:
         def operation(project: Project, draft: Draft) -> None:
             if duration is not None:
+                end = next(key for key in project.keyframes if key.time == project.duration)
+                end.time = duration
                 project.duration = duration
+                if draft.selected_key == end.id:
+                    draft.cursor = duration
             if fps is not None:
                 project.fps = fps
             draft.cursor = min(draft.cursor, project.duration)
 
         field = "duration" if duration is not None else "fps"
-        self.edit(operation, merge_key=("timing", field) if duration is None or fps is None else None)
+        self._edit(operation, merge_key=("timing", field) if duration is None or fps is None else None)
 
     def set_settings(self, **values: float | int | str) -> None:
         settings = SolverSettings.model_validate({**self._state.project.settings.model_dump(), **values})
@@ -242,7 +244,7 @@ class Editor:
             if len(values) == 1 and not isinstance(next(iter(values.values())), (bool, str))
             else None
         )
-        self.edit(lambda project, draft: setattr(project, "settings", settings), merge_key=merge_key)
+        self._edit(lambda project, draft: setattr(project, "settings", settings), merge_key=merge_key)
 
     def set_frame_task(self, name: str, task: FrameTask) -> None:
         current = self._state.project.frame_tasks.get(name)
@@ -256,7 +258,7 @@ class Editor:
             if current is not None and (current.mode, current.reference_body) == (task.mode, task.reference_body)
             else None
         )
-        self.edit(operation, merge_key=merge_key)
+        self._edit(operation, merge_key=merge_key)
 
     def capture(self, name: str, *, locked: bool = True) -> None:
         key = Keyframe(
@@ -271,8 +273,7 @@ class Editor:
             draft.selected_key = key.id
             draft.held_key = key.id
 
-        self.edit(operation)
-        self.finish_edit()
+        self._edit(operation)
 
     def select_key(self, key_id: str | None) -> None:
         if key_id is None:
@@ -298,6 +299,8 @@ class Editor:
             if key is None:
                 raise ValueError("关键帧已不存在")
             if time is not None:
+                if time != key.time and project.is_boundary_key(key):
+                    raise ValueError("首尾关键帧的时间固定为 0 s 和动作时长")
                 key.time = time
                 if draft.selected_key == key_id:
                     draft.cursor = time
@@ -311,17 +314,19 @@ class Editor:
         updates = {"time": time, "name": name, "locked": locked, "zero_velocity": zero_velocity}
         fields = [field for field, value in updates.items() if value is not None]
         merge_key = (fields[0], key_id) if len(fields) == 1 and fields[0] in ("time", "name") else None
-        self.edit(operation, merge_key=merge_key)
+        self._edit(operation, merge_key=merge_key)
 
     def delete_key(self, key_id: str) -> None:
         def operation(project: Project, draft: Draft) -> None:
+            if any(key.id == key_id and project.is_boundary_key(key) for key in project.keyframes):
+                raise ValueError("首尾关键帧不能删除")
             project.keyframes = [key for key in project.keyframes if key.id != key_id]
             if draft.selected_key == key_id:
                 draft.selected_key = None
             if draft.held_key == key_id:
                 draft.held_key = None
 
-        self.edit(operation)
+        self._edit(operation)
 
     def _set_pose(self, qpos: FloatArray, *, merge: bool = True, constraints: EditConstraints | None = None) -> None:
         current = self._state.draft
@@ -349,7 +354,7 @@ class Editor:
             key.qpos = qpos.tolist()
             update_draft(draft)
 
-        self.edit(update_key, merge_key=merge_key)
+        self._edit(update_key, merge_key=merge_key)
 
     def set_joint_locked(self, name: str, locked: bool) -> None:
         if name not in self.robot.joint_names:
@@ -390,19 +395,7 @@ class Editor:
             raise ValueError(f"关节已锁定：{name}")
         candidate = self._state.draft.qpos.copy()
         candidate[self.robot.qadr[self.robot.joint_names.index(name)]] = value
-        self._set_pose(self.robot.validate_qpos(candidate))
-
-    def move_target(self, target: PoseTarget) -> IKResult:
-        result = solve_ik(
-            self.robot,
-            self._state.draft.qpos,
-            [target],
-            constraints=self._state.draft.constraints,
-        )
-        # IK 失败不提交部分姿态；用户可以放松姿态方向或移动 torso 后重试。
-        if result.success:
-            self._set_pose(result.qpos)
-        return result
+        self._set_pose(candidate)
 
     def move_root(self, position: ArrayLike, quaternion: ArrayLike) -> None:
         if not self.robot.floating:
@@ -411,22 +404,14 @@ class Editor:
             raise ValueError("torso 位置需要三个分量，朝向需要四个 wxyz 四元数分量")
         candidate = self._state.draft.qpos.copy()
         candidate[:3], candidate[3:7] = position, quaternion
-        self._set_pose(self.robot.validate_qpos(candidate))
+        self._set_pose(candidate)
 
-    def drag_target(
-        self,
-        target: PoseTarget,
-        *,
-        position_step: float = 0.003,
-        rotation_step: float = np.pi / 60,
-    ) -> DragResult:
+    def drag_target(self, target: PoseTarget) -> DragResult:
         result = follow_target(
             self.robot,
             self._state.draft.qpos,
             target,
             constraints=self._state.draft.constraints,
-            position_step=position_step,
-            rotation_step=rotation_step,
         )
         if result.applied:
             self._set_pose(result.qpos)

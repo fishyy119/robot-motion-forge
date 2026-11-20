@@ -3,20 +3,18 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import SupportsIndex, cast
 
 import json5
 import mujoco as mj
 import numpy as np
-from numpy.typing import ArrayLike, NDArray
-from scipy.spatial.transform import Rotation
+from numpy.typing import ArrayLike
 
-from robot_motion_forge.rotations import rotation_to_wxyz
+from robot_motion_forge.utils.array_types import FloatArray
+from robot_motion_forge.utils.rotations import normalize_wxyz
 
 from .definition import ControlFrame, RobotDefinition
-from .environment import Environment
-
-type FloatArray = NDArray[np.float64]
+from .kinematics import forward_kinematics
 
 
 @dataclass(frozen=True)
@@ -94,6 +92,9 @@ class Robot:
             raise ValueError("可编辑关节必须有名称")
         self.qadr = np.asarray([m.jnt_qposadr[i] for i in self.joint_ids], dtype=int)
         self.vadr = np.asarray([m.jnt_dofadr[i] for i in self.joint_ids], dtype=int)
+        # 根旋转在 SO(3) 上单独处理，线性坐标包括根平移和标量关节。
+        self.linear_qpos_indices = np.r_[:3, self.qadr] if self.floating else self.qadr
+        self.linear_qvel_indices = np.r_[:3, self.vadr] if self.floating else self.vadr
         self.lower: FloatArray = np.asarray(
             [m.jnt_range[i, 0] if m.jnt_limited[i] else -np.inf for i in self.joint_ids]
         )
@@ -103,10 +104,9 @@ class Robot:
         for name, frame in self.frames.items():
             self.body_id(frame.body)
             self.frame_reference_id(name, frame.trajectory_reference_body)
-            if frame.support_polygon_cm:
+            if (support_normal := frame.support_normal) is not None:
                 vertices = np.asarray(frame.support_polygon_cm, dtype=float) / 100.0
-                _, _, axes = np.linalg.svd(vertices - vertices[0, :], full_matrices=False)
-                normal = axes[-1, :].copy()
+                normal = np.asarray(support_normal)
                 vertices.flags.writeable = normal.flags.writeable = False
                 self.support_polygons[name] = SupportPolygon(self.frame_site_ids[name], vertices, normal)
         for group in config.joint_groups.values():
@@ -130,7 +130,7 @@ class Robot:
                     raise ValueError(f"home.{field} 的单位与关节类型不匹配：{name}")
                 self.home[self.qadr[index]] = value
         self.home = self.validate_qpos(self.home)
-        self.environment = Environment(spec)
+        self._spec = spec
 
     @classmethod
     def load(cls, path: str | Path) -> "Robot":
@@ -139,6 +139,10 @@ class Robot:
         # JSON5 解析配置文本，Pydantic 随后校验字段与数值。
         raw = json5.loads(path.read_text(encoding="utf-8"), allow_duplicate_keys=False)
         return cls(RobotDefinition.model_validate(raw), config_path=path)
+
+    def copy_spec(self) -> mj.MjSpec:
+        """复制已应用关节限位和控制坐标系的 MuJoCo 规格，供组合场景使用。"""
+        return self._spec.copy()
 
     def body_id(self, name: str) -> int:
         index = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_BODY, name)
@@ -157,6 +161,10 @@ class Robot:
             raise ValueError(f"坐标系 {name} 的参考连杆不能是自身连杆")
         return self.body_id(reference_body) if reference_body is not None else None
 
+    def is_slide_joint(self, index: SupportsIndex) -> bool:
+        """按 joint_names 的顺序判断关节是否为滑动关节。"""
+        return bool(self.model.jnt_type[self.joint_ids[index]] == mj.mjtJoint.mjJNT_SLIDE)
+
     def validate_qpos(self, qpos: ArrayLike, *, limits: bool = True) -> FloatArray:
         qpos = np.asarray(qpos, dtype=float).copy()
         if qpos.shape != (self.model.nq,):
@@ -164,17 +172,16 @@ class Robot:
         if not np.isfinite(qpos).all():
             raise ValueError(f"qpos 必须包含 {self.model.nq} 个有限数值")
         if self.floating:
-            norm = np.linalg.norm(qpos[3:7])
-            if not np.isfinite(norm) or norm < 1e-9:
-                raise ValueError("根四元数不能为零")
             # 已归一化的四元数保持原值，重复校验不会改变工程指纹。
-            if abs(norm - 1.0) > 1e-12:
-                qpos[3:7] /= norm
+            try:
+                qpos[3:7] = normalize_wxyz(qpos[3:7], preserve_unit=True)
+            except ValueError as exc:
+                raise ValueError("根四元数不能为零") from exc
         if limits:
             outside = np.flatnonzero((qpos[self.qadr] < self.lower - 1e-8) | (qpos[self.qadr] > self.upper + 1e-8))
             if len(outside):
                 index = int(outside[0])
-                unit = "m" if self.model.jnt_type[self.joint_ids[index]] == mj.mjtJoint.mjJNT_SLIDE else "rad"
+                unit = "m" if self.is_slide_joint(index) else "rad"
                 raise ValueError(
                     f"关节 {self.joint_names[index]} 超出有效限位：{qpos[self.qadr[index]]:.6g} {unit}，"
                     f"范围 [{self.lower[index]:.6g}, {self.upper[index]:.6g}] {unit}"
@@ -182,13 +189,9 @@ class Robot:
         return qpos
 
     def forward(self, qpos: ArrayLike, data: mj.MjData | None = None) -> mj.MjData:
-        state = mj.MjData(self.model) if data is None else data
-        state.qpos[:] = qpos
-        mj.mj_kinematics(self.model, state)
-        mj.mj_comPos(self.model, state)
-        return state
+        return forward_kinematics(self.model, qpos, data)
 
-    def pose(self, data: mj.MjData, name: str) -> tuple[FloatArray, FloatArray]:
+    def frame_pose(self, data: mj.MjData, name: str) -> tuple[FloatArray, FloatArray]:
         """读取控制坐标系 site 的世界位置与 wxyz 朝向，返回独立数组。"""
         site = self.frame_site_ids[name]
         orientation = np.empty(4)
@@ -202,36 +205,6 @@ class Robot:
         jacobian = np.empty((3, self.model.nv))
         mj.mj_jacSubtreeCom(self.model, data, jacobian, self.root_id)
         return jacobian
-
-    def selectable_joints(self, body: int) -> tuple[str, ...]:
-        """网格归属最近的上游活动关节，刚性附属连杆不成为独立操作对象。"""
-        while body:
-            joints = tuple(
-                self.model.joint(joint).name for joint in self.joint_ids if self.model.jnt_bodyid[joint] == body
-            )
-            if joints:
-                return joints
-            body = int(self.model.body_parentid[body])
-        return ()
-
-    def joint_pose(self, data: mj.MjData, name: str) -> tuple[FloatArray, FloatArray]:
-        """关节控件位姿：Z 轴与真实关节轴一致，转环位于铰链锚点。"""
-        m = self.model
-        joint = self.joint_ids[self.joint_names.index(name)]
-        z = data.xaxis[joint]
-        reference = np.eye(3)[int(np.argmin(abs(z)))]
-        x = np.cross(reference, z)
-        x /= np.linalg.norm(x)
-        frame = Rotation.from_matrix(np.column_stack((x, np.cross(z, x), z)))
-        if m.jnt_type[joint] == mj.mjtJoint.mjJNT_HINGE:
-            # 转环随当前关节转动，松开后不会跳回零角度；ref 对应模型 qpos0。
-            address = m.jnt_qposadr[joint]
-            frame *= Rotation.from_rotvec((0.0, 0.0, float(data.qpos[address] - m.qpos0[address])))
-        orientation = rotation_to_wxyz(frame)
-        position = (
-            data.xpos[m.jnt_bodyid[joint]] if m.jnt_type[joint] == mj.mjtJoint.mjJNT_SLIDE else data.xanchor[joint]
-        )
-        return position.copy(), orientation
 
     def difference(self, a: ArrayLike, b: ArrayLike, dt: float = 1.0) -> FloatArray:
         out = np.empty(self.model.nv)

@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from functools import partial
 from typing import TYPE_CHECKING
 
-from ..viser_bridge import gui_uuid
+from ..viser_bridge import gui_uuid, json_for_script
 
 if TYPE_CHECKING:
     from viser import ClientHandle, GuiButtonGroupHandle, GuiSliderHandle, GuiTabHandle
@@ -75,7 +74,7 @@ class TimelineTab:
         # 刻度标签按关键帧 ID 提交，重复点击同一时刻仍执行选帧。
         slider = gui_uuid(self._scrub)
         button_group = gui_uuid(self._mark_click)
-        key_ids = json.dumps(self._mark_click.options).replace("<", "\\u003c")
+        key_ids = json_for_script(self._mark_click.options)
         return (
             f'<script type="application/json" data-rmf-timeline="{slider}" data-mark-click="{button_group}">'
             f"{key_ids}</script>"

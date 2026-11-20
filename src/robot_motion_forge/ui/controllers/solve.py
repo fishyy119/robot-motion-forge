@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from threading import Event
 from typing import TYPE_CHECKING
 
-from robot_motion_forge.io.export import serialize_motion
-from robot_motion_forge.solvers.trajectory import SolveCancelled, optimize
+from robot_motion_forge.io.gmr_export import serialize_motion
+from robot_motion_forge.solvers.trajectory.solve import SolveCancelled, optimize
 
 if TYPE_CHECKING:
     from concurrent.futures import Executor, Future
@@ -17,7 +17,6 @@ if TYPE_CHECKING:
 
     from robot_motion_forge.application.editor import Editor
     from robot_motion_forge.motion.trajectory import SolvedTrajectory
-    from robot_motion_forge.motion.types import FrameTask
 
     from ..notifications import Notifications, OperationNotification
     from ..tabs.solve import SolveTab
@@ -50,17 +49,12 @@ class SolveController:
         self._pause, self._reset_target = pause, reset_target
         self._on_solution = on_solution
         self._job: _SolveJob | None = None
+        self._action_state: tuple[bool, bool] | None = None
         self._sync_actions()
 
     def set_timing(self, *, duration: float | None = None, fps: float | None = None) -> None:
         self._reset_target()
         self._editor.set_timing(duration=duration, fps=fps)
-
-    def set_setting(self, name: str, value: float | int | str) -> None:
-        self._editor.set_settings(**{name: value})
-
-    def set_frame_task(self, name: str, task: FrameTask) -> None:
-        self._editor.set_frame_task(name, task)
 
     def export(self, client: ClientHandle) -> None:
         trajectory = self._editor.trajectory
@@ -132,7 +126,10 @@ class SolveController:
             self._sync_actions()
 
     def _sync_actions(self) -> None:
-        self._tab.set_actions(busy=self._job is not None, solved=self._editor.trajectory is not None)
+        busy, solved = self._job is not None, self._editor.trajectory is not None
+        if self._action_state != (busy, solved):
+            self._action_state = busy, solved
+            self._tab.set_actions(busy=busy, solved=solved)
 
     def close(self, reason: str = "") -> None:
         # 工程重建后不再轮询旧任务；取消并完成其通知，后台只持有旧快照。

@@ -1,4 +1,4 @@
-"""原子文件写入，供工程保存、动作导出与机器人定义 Schema 导出共用。"""
+"""原子文件写入，供工程保存与机器人定义 Schema 导出共用。"""
 
 import json
 import os
@@ -8,7 +8,6 @@ from pathlib import Path
 
 
 def atomic_write(path: Path, payload: bytes) -> None:
-    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:

@@ -166,6 +166,45 @@ div:not(.mantine-Flex-root):has(> .mantine-Button-root[id]) {
         width: 3rem;
         text-align: center;
     }
+    & [data-rmf-current-key] > td {
+        background: var(--mantine-primary-color-light);
+    }
+    & button {
+        padding: 0;
+        border: 0;
+        border-radius: 0.25rem;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        cursor: pointer;
+
+        &:focus-visible {
+            outline: 2px solid var(--mantine-primary-color-filled);
+            outline-offset: 2px;
+        }
+    }
+    & .rmf-key-name {
+        display: block;
+        width: 100%;
+        text-align: inherit;
+        overflow-wrap: anywhere;
+
+        &:hover {
+            text-decoration: underline;
+        }
+    }
+    & .rmf-key-state {
+        min-width: 1.75rem;
+        min-height: 1.5rem;
+        color: var(--mantine-color-dimmed);
+
+        &[aria-pressed="true"] {
+            color: var(--mantine-primary-color-light-color);
+        }
+        &:hover {
+            background: var(--mantine-color-default-hover);
+        }
+    }
 }
 .rmf-curve-cursor {
     position: absolute;
@@ -177,7 +216,7 @@ div:not(.mantine-Flex-root):has(> .mantine-Button-root[id]) {
     z-index: 1;
 }
 
-.rmf-frame-menu,
+.rmf-scene-menu,
 .rmf-scene-tooltip {
     position: fixed;
     z-index: 2147483647;
@@ -190,7 +229,7 @@ div:not(.mantine-Flex-root):has(> .mantine-Button-root[id]) {
     box-shadow: 0 3px 12px #0003;
 }
 .rmf-scene-tooltip,
-.rmf-frame-menu-title {
+.rmf-scene-menu-title {
     font-size: var(--rmf-font-caption);
     overflow-wrap: anywhere;
 }
@@ -200,21 +239,24 @@ div:not(.mantine-Flex-root):has(> .mantine-Button-root[id]) {
     padding: 0.375rem 0.5rem;
     white-space: pre-line;
 }
-.rmf-frame-menu {
+.rmf-scene-menu {
     min-width: min(16rem, calc(100vw - 1rem));
     padding: 0.25rem;
 }
-.rmf-frame-menu-groups {
+.rmf-frame-menu-groups,
+.rmf-joint-menu {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
     border-top: 1px solid var(--mantine-color-default-border);
 }
-.rmf-frame-menu-title {
+.rmf-frame-menu-groups {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.rmf-scene-menu-title {
     margin: 0;
     padding: 0.25rem 0.5rem;
     color: var(--mantine-color-dimmed);
 }
-.rmf-frame-menu button {
+.rmf-scene-menu button {
     display: block;
     width: 100%;
     padding: 0.375rem 0.5rem;
@@ -224,6 +266,7 @@ div:not(.mantine-Flex-root):has(> .mantine-Button-root[id]) {
     color: inherit;
     font: inherit;
     text-align: start;
+    overflow-wrap: anywhere;
     cursor: pointer;
 
     &:hover {

@@ -7,17 +7,12 @@ from functools import partial
 from html import escape
 from typing import TYPE_CHECKING
 
-from robot_motion_forge.application.editor import Editor
-
 if TYPE_CHECKING:
     from pathlib import Path
 
     from viser import ClientHandle, GuiButtonGroupHandle
 
-    from robot_motion_forge.application.workspace import Workspace
-
     from ..controls import Controls
-    from ..notifications import Notifications
 
 
 class ProjectTab:
@@ -33,26 +28,17 @@ class ProjectTab:
 
     def bind_actions(
         self,
-        editor: Editor,
         *,
-        workspace: Workspace,
-        replace_project: Callable[[Editor, Path], None],
-        notifications: Notifications,
+        save: Callable[[str], str],
+        reload: Callable[[str], None],
     ) -> None:
-        def save(filename: str) -> None:
-            path = workspace.project_path(filename)
-            editor.save(path)
+        def save_file(filename: str) -> None:
+            normalized_name = save(filename)
             # 只规范化仍对应本次保存的文件名，保留排队期间的新输入。
             if self._filename.value == filename:
-                self._filename.value = path.name
-            notifications.show("工程已保存", path.name)
+                self._filename.value = normalized_name
 
-        def load(filename: str) -> None:
-            path = workspace.project_path(filename)
-            replace_project(Editor.load(editor.robot, path), path)
-            notifications.show("工程已重新加载", path.name)
-
-        file_actions = {"保存": save, "重新加载": load}
+        file_actions = {"保存": save_file, "重新加载": reload}
 
         def prepare_file(_client: ClientHandle, target: GuiButtonGroupHandle) -> Callable[[], None]:
             return partial(file_actions[target.value], self._filename.value)

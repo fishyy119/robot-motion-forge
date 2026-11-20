@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,9 +16,20 @@ def gui_uuid[ValueT](handle: GuiInputHandle[ValueT] | GuiButtonGroupHandle) -> s
     return handle._impl.uuid  # pyright: ignore[reportPrivateUsage, reportUnknownMemberType]
 
 
+def json_for_script(value: object, *, ensure_ascii: bool = True) -> str:
+    """序列化为 application/json 脚本的文本，避免内容被解析为 HTML 标签。"""
+    return json.dumps(value, ensure_ascii=ensure_ascii).replace("<", "\\u003c")
+
+
 def register_browser_extensions(server: ViserServer) -> None:
     root = Path(__file__).parent
-    scripts = ("viser_bridge.js", "scene.js", "tabs/timeline.js", "tabs/joint_curves.js")
+    scripts = (
+        "viser_bridge.js",
+        "scene/interactions.js",
+        "tabs/arrangement.js",
+        "tabs/timeline.js",
+        "tabs/joint_curves.js",
+    )
     code = "\n".join((root / name).read_text(encoding="utf-8") for name in scripts)
     source = f"(() => {{\n{code}\n}})();"
     server._websock_server.queue_message(_messages.RunJavascriptMessage(source=source))  # pyright: ignore[reportPrivateUsage]

@@ -5,7 +5,6 @@ from __future__ import annotations
 from math import degrees
 from typing import TYPE_CHECKING
 
-import mujoco as mj
 import numpy as np
 
 from ..controls import grouped_joint_names
@@ -14,7 +13,8 @@ if TYPE_CHECKING:
     from viser import GuiFolderHandle, GuiUplotHandle
 
     from robot_motion_forge.motion.trajectory import SolvedTrajectory
-    from robot_motion_forge.robot.model import FloatArray, Robot
+    from robot_motion_forge.robot.model import Robot
+    from robot_motion_forge.utils.array_types import FloatArray
 
     from ..controls import Controls
 
@@ -48,7 +48,7 @@ class JointCurvesTab:
             with folder:
                 for name in names:
                     index = joints[name]
-                    slide = robot.model.jnt_type[robot.joint_ids[index]] == mj.mjtJoint.mjJNT_SLIDE
+                    slide = robot.is_slide_joint(index)
                     unit = "m" if slide else "°"
                     unit_factor = 1.0 if slide else degrees(1.0)
                     minimum_span = (0.001 if slide else 0.01) * unit_factor

@@ -34,16 +34,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     # 帮助与参数校验在加载应用依赖前完成。
     args = _parser().parse_args(argv, namespace=CLIArgs())
 
+    from robot_motion_forge.application.editor import Editor
+    from robot_motion_forge.application.workspace import Workspace
     from robot_motion_forge.robot.model import Robot
-
-    from .editor import Editor
-    from .workspace import Workspace
 
     try:
         robot = Robot.load(args.robot)
         workspace = Workspace(robot.repository_root)
-        project_path = workspace.project_path(args.project) if args.project is not None else None
-        editor = Editor.load(robot, project_path) if project_path is not None else Editor(robot)
+        project_path = workspace.project_path(args.project)
+        editor = Editor.load(robot, project_path) if args.project is not None else Editor(robot)
     except (ValueError, OSError) as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 1
@@ -53,9 +52,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     app = ForgeApp(
         editor,
         workspace=workspace,
+        project_path=project_path,
         host=args.host,
         port=args.port,
-        project_name=args.project,
     )
     app.run()
     return 0

@@ -1,19 +1,47 @@
-"""姿态编辑约束：关节锁定与控制坐标系的世界位姿锚定。"""
+"""姿态编辑目标与约束：关节锁定和控制坐标系的世界位姿锚定。"""
 
-import math
+from dataclasses import dataclass
+from typing import cast
 
 import mujoco as mj
 import numpy as np
 from pydantic import Field, field_validator
 
 from robot_motion_forge.robot.definition import ControlMode
-from robot_motion_forge.robot.model import FloatArray, Robot
-from robot_motion_forge.rotations import rotation_from_wxyz
+from robot_motion_forge.robot.model import Robot
+from robot_motion_forge.utils.array_types import FloatArray
+from robot_motion_forge.utils.pydantic_models import Name
+from robot_motion_forge.utils.rotations import normalize_wxyz, rotation_from_wxyz
 
-from .types import JointNames, MotionModel, Name, PoseTarget
+from .types import JointNames, MotionModel
 
 ANCHOR_POSITION_TOLERANCE_M = 1e-5
 ANCHOR_ORIENTATION_TOLERANCE_RAD = 1e-4
+
+
+@dataclass
+class PoseTarget:
+    """同一控制坐标系的世界位姿目标，控制模式决定参与求解的分量。"""
+
+    frame: str
+    position: list[float]
+    quaternion: list[float] | None = None
+    # 朝向任务仍保留位置供控件定位，但不将它计入求解。
+    track_position: bool = True
+
+    def validate(self, robot: Robot) -> None:
+        robot.frame(self.frame)
+        if np.shape(self.position) != (3,) or not np.isfinite(self.position).all():
+            raise ValueError("位姿目标位置必须为三个有限数值")
+        if not isinstance(cast(object, self.track_position), bool):
+            raise ValueError("track_position 必须为布尔值")
+        if not self.track_position and self.quaternion is None:
+            raise ValueError("关闭位置跟踪时必须提供目标朝向")
+        if self.quaternion is not None:
+            try:
+                self.quaternion = normalize_wxyz(self.quaternion).tolist()
+            except ValueError as exc:
+                raise ValueError("位姿目标方向必须为非零有限 wxyz 四元数") from exc
 
 
 class FrameAnchor(MotionModel):
@@ -24,13 +52,11 @@ class FrameAnchor(MotionModel):
     @field_validator("quaternion")
     @classmethod
     def normalize_quaternion(cls, value: list[float]) -> list[float]:
-        norm = math.hypot(*value)
-        if not math.isfinite(norm) or norm < 1e-9:
-            raise ValueError("固定朝向必须为非零有限 wxyz 四元数")
         # 草稿提交会递归重验；已归一化的世界锚点保持原值，避免舍入变化重置连续操作。
-        if abs(norm - 1.0) <= 1e-12:
-            return value
-        return (np.asarray(value) / norm).tolist()
+        try:
+            return normalize_wxyz(value, preserve_unit=True).tolist()
+        except ValueError as exc:
+            raise ValueError("固定朝向必须为非零有限 wxyz 四元数") from exc
 
     def target(self, name: str) -> PoseTarget:
         return PoseTarget(
@@ -52,7 +78,7 @@ class EditConstraints(MotionModel):
             robot.frame(name)
 
     def capture(self, robot: Robot, data: mj.MjData, name: str, mode: ControlMode) -> None:
-        position, orientation = robot.pose(data, name)
+        position, orientation = robot.frame_pose(data, name)
         self.anchors[name] = FrameAnchor(mode=mode, position=position.tolist(), quaternion=orientation.tolist())
 
     def reanchor(self, robot: Robot, qpos: FloatArray) -> None:
@@ -63,7 +89,7 @@ class EditConstraints(MotionModel):
 
     def violated_anchor(self, robot: Robot, data: mj.MjData) -> str | None:
         for name, anchor in self.anchors.items():
-            position, orientation = robot.pose(data, name)
+            position, orientation = robot.frame_pose(data, name)
             if (
                 anchor.mode != "orientation"
                 and np.linalg.norm(position - anchor.position) > ANCHOR_POSITION_TOLERANCE_M

@@ -1,6 +1,5 @@
 """可版本化工程读写。JSON 不包含模型或网格，也不使用 pickle 恢复工程。"""
 
-import json
 from copy import deepcopy
 from pathlib import Path
 from typing import Literal, NamedTuple, cast
@@ -8,17 +7,18 @@ from typing import Literal, NamedTuple, cast
 import numpy as np
 from pydantic import Field
 
-from robot_motion_forge.motion.constraints import EditConstraints
 from robot_motion_forge.motion.draft import Draft, PoseSource
+from robot_motion_forge.motion.pose_constraints import EditConstraints
 from robot_motion_forge.motion.project import Project
 from robot_motion_forge.motion.trajectory import SolvedTrajectory, validate_trajectory
-from robot_motion_forge.motion.types import JointNames, MotionModel, Name
+from robot_motion_forge.motion.types import JointNames
 from robot_motion_forge.robot.model import Robot
+from robot_motion_forge.utils.pydantic_models import Name, StrictModel
 
 from .atomic import atomic_json
 
 
-class SavedDraft(MotionModel):
+class SavedDraft(StrictModel):
     qpos: list[float]
     cursor: float = Field(ge=0)
     selected_key: Name | None
@@ -27,7 +27,7 @@ class SavedDraft(MotionModel):
     pose_source: PoseSource = "previous_keyframe"
 
 
-class SavedSolution(MotionModel):
+class SavedSolution(StrictModel):
     fingerprint: Name
     times: list[float]
     qpos: list[list[float]]
@@ -36,13 +36,13 @@ class SavedSolution(MotionModel):
     message: str
 
 
-class ProjectFile(MotionModel):
+class ProjectFile(StrictModel):
     schema_version: Literal[14]
     joint_names: JointNames
     project: Project
     draft: SavedDraft
     # 先核对指纹，再解析求解器生成的数据。
-    solution: object = None
+    solution: object = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class LoadedProject(NamedTuple):
@@ -67,7 +67,7 @@ def save_project(
             qvel=trajectory.qvel.tolist(),
             converged=trajectory.converged,
             message=trajectory.message,
-        ).model_dump()
+        )
     document = ProjectFile(
         schema_version=14,
         joint_names=robot.joint_names.copy(),
@@ -78,12 +78,12 @@ def save_project(
             cursor=draft.cursor,
             selected_key=draft.selected_key,
             held_key=draft.held_key,
-            constraints=draft.constraints.model_copy(deep=True),
+            constraints=draft.constraints,
             pose_source=draft.pose_source,
         ),
         solution=saved,
     )
-    atomic_json(path.expanduser().resolve(), document.model_dump(exclude={"solution"} if saved is None else set()))
+    atomic_json(path.expanduser().resolve(), document.model_dump())
 
 
 def _load_solution(cache: object, robot: Robot, project: Project) -> SolvedTrajectory | None:
@@ -110,8 +110,7 @@ def _load_solution(cache: object, robot: Robot, project: Project) -> SolvedTraje
 
 def load_project(path: Path, robot: Robot) -> LoadedProject:
     """读取并校验工程结构；姿态与当前模型的匹配在加载时检查。"""
-    raw: object = json.loads(path.expanduser().resolve().read_text(encoding="utf-8"))
-    document = ProjectFile.model_validate(raw)
+    document = ProjectFile.model_validate_json(path.expanduser().resolve().read_bytes())
     if document.joint_names != robot.joint_names:
         raise ValueError("工程的有序关节列表与当前机器人不一致")
     project = document.project.normalized(robot)
@@ -120,7 +119,7 @@ def load_project(path: Path, robot: Robot) -> LoadedProject:
         cursor=document.draft.cursor,
         selected_key=document.draft.selected_key,
         held_key=document.draft.held_key,
-        constraints=document.draft.constraints.model_copy(deep=True),
+        constraints=document.draft.constraints,
         pose_source=document.draft.pose_source,
     )
     draft.validate(robot, project)

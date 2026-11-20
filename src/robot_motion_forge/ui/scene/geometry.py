@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
     from viser import BoxHandle, CylinderHandle, IcosphereHandle, MeshHandle, SceneApi
 
-    from robot_motion_forge.robot.model import FloatArray
+    from robot_motion_forge.utils.array_types import FloatArray
 
     class _GeometryProps(TypedDict):
         color: tuple[int, int, int]

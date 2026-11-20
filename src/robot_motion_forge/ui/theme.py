@@ -35,4 +35,4 @@ def apply_theme(gui: GuiApi, *, dark_mode: bool) -> None:
     )
 
 
-THEME_STYLE = f"<style>{Path(__file__).with_suffix('.css').read_text(encoding='utf-8')}</style>"
+THEME_STYLE = f"<style>{Path(__file__).with_name('styles.css').read_text(encoding='utf-8')}</style>"

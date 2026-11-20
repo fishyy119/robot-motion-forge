@@ -8,17 +8,20 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 from numpy.typing import ArrayLike
+from scipy.spatial.transform import Rotation
 
-from robot_motion_forge.motion.types import PoseTarget
-from robot_motion_forge.robot.model import FloatArray
-from robot_motion_forge.rotations import rotation_from_wxyz
+from robot_motion_forge.motion.pose_constraints import PoseTarget
+from robot_motion_forge.utils.array_types import FloatArray
+from robot_motion_forge.utils.rotations import rotation_from_wxyz, rotation_to_wxyz
 
-from .theme import warning_color
+from ..theme import warning_color
 
 if TYPE_CHECKING:
+    import mujoco as mj
     from viser import ClientHandle, TransformControlsEvent, ViserServer
 
     from robot_motion_forge.robot.definition import ControlMode
+    from robot_motion_forge.robot.model import Robot
 
 
 @dataclass(frozen=True)
@@ -40,6 +43,25 @@ class _JointFrame:
     position: FloatArray
     quaternion: FloatArray
     slide: bool
+
+
+def _joint_control_pose(
+    model: mj.MjModel, data: mj.MjData, joint: int, *, slide: bool
+) -> tuple[FloatArray, FloatArray]:
+    """关节控件位姿：Z 轴与真实关节轴一致，转环位于铰链锚点。"""
+    z = data.xaxis[joint]
+    reference = np.eye(3)[int(np.argmin(abs(z)))]
+    x = np.cross(reference, z)
+    x /= np.linalg.norm(x)
+    frame = Rotation.from_matrix(np.column_stack((x, np.cross(z, x), z)))
+    if slide:
+        position = data.xpos[model.jnt_bodyid[joint]]
+    else:
+        # 转环随当前关节转动，松开后不会跳回零角度；ref 对应模型 qpos0。
+        address = model.jnt_qposadr[joint]
+        frame *= Rotation.from_rotvec((0.0, 0.0, float(data.qpos[address] - model.qpos0[address])))
+        position = data.xanchor[joint]
+    return position.copy(), rotation_to_wxyz(frame)
 
 
 class DragControls:
@@ -130,19 +152,23 @@ class DragControls:
             target, self._pending = self._pending, None
             return DragInput(target=target, gesture=self._gesture, client=self._client)
 
-    def clear(self) -> None:
+    def clear(self, *, deselect: bool = False) -> None:
         with self._lock:
             self._pending = None
             self._active = None
             self._client = None
+            if deselect:
+                self._selection = None
 
     def hide(self) -> None:
-        self.clear()
-        with self._lock:
-            self._selection = None
+        self.clear(deselect=True)
         self.gizmo.visible = self.requested.visible = self.actual.visible = self.error_line.visible = False
 
-    def show_joint(self, name: str, value: float, position: FloatArray, quaternion: FloatArray, *, slide: bool) -> None:
+    def show_joint(self, robot: Robot, data: mj.MjData, index: int) -> None:
+        name = robot.joint_names[index]
+        value = float(data.qpos[robot.qadr[index]])
+        slide = robot.is_slide_joint(index)
+        position, quaternion = _joint_control_pose(robot.model, data, robot.joint_ids[index], slide=slide)
         with self._lock:
             self._selection = _JointFrame(name, value, position.copy(), quaternion.copy(), slide)
             dragging = self._active is not None

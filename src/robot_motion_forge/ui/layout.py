@@ -4,14 +4,20 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .tabs import ArrangementTab, DisplayTab, JointCurvesTab, PoseTab, ProjectTab, SolveTab, TimelineTab
-from .theme import THEME_STYLE
+from .tabs.arrangement import ArrangementTab
+from .tabs.display import DisplayTab
+from .tabs.joint_curves import JointCurvesTab
+from .tabs.pose import PoseTab
+from .tabs.project import ProjectTab
+from .tabs.solve import SolveTab
+from .tabs.timeline import TimelineTab
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from robot_motion_forge.motion.project import Project
-    from robot_motion_forge.robot.model import FloatArray, Robot
+    from robot_motion_forge.robot.model import Robot
+    from robot_motion_forge.utils.array_types import FloatArray
 
     from .controls import Controls
 
@@ -31,7 +37,6 @@ class Sidebar:
         gui.main_panel.dock_right()
         gui.main_panel.set_width(440)
         gui.main_panel.expand()
-        gui.add_html(THEME_STYLE)
         tabs = gui.add_tab_group()
         with tabs.add_tab("编排"):
             self.arrangement = ArrangementTab(controls)
@@ -43,10 +48,9 @@ class Sidebar:
             self.joint_curves = JointCurvesTab(controls, robot=robot)
         with tabs.add_tab("工程"):
             self.project = ProjectTab(controls, project_path=project_path)
-        gui.add_html(self.pose.frame_menu_metadata())
 
 
-class PlaybackPanel:
+class BottomPanel:
     def __init__(
         self,
         controls: Controls,
