@@ -18,7 +18,7 @@ from robot_motion_forge.utils.rotations import (
     skew,
 )
 
-from .parameters import Jacobians, KnotVelocityMap, Parameters, PoseLayout, write_jacobians
+from ..parameters import Jacobians, KnotVelocityMap, Parameters, PoseLayout, write_jacobians
 
 
 @dataclass(frozen=True)

@@ -13,6 +13,7 @@ from robot_motion_forge.motion.project import Project
 from robot_motion_forge.motion.trajectory import SolvedTrajectory, validate_trajectory
 from robot_motion_forge.motion.types import JointNames
 from robot_motion_forge.robot.model import Robot
+from robot_motion_forge.utils.paths import resolve_path
 from robot_motion_forge.utils.pydantic_models import Name, StrictModel
 
 from .atomic import atomic_json
@@ -51,6 +52,18 @@ class LoadedProject(NamedTuple):
     trajectory: SolvedTrajectory | None
 
 
+def resolve_project_path(project_root: Path, relative_path: str | Path | None = None) -> Path:
+    """解析工程根目录内的文件路径。"""
+    if relative_path is None:
+        relative_path = "untitled.motion.json"
+    if isinstance(relative_path, str):
+        relative_path = relative_path.strip()
+    path = (project_root / relative_path).resolve()
+    if project_root not in path.parents:
+        raise ValueError(f"工程文件必须位于 project_root 目录内（{project_root}），实际路径为 {path}")
+    return path
+
+
 def save_project(
     path: Path, robot: Robot, project: Project, draft: Draft, trajectory: SolvedTrajectory | None = None
 ) -> None:
@@ -83,7 +96,7 @@ def save_project(
         ),
         solution=saved,
     )
-    atomic_json(path.expanduser().resolve(), document.model_dump())
+    atomic_json(resolve_path(path), document.model_dump())
 
 
 def _load_solution(cache: object, robot: Robot, project: Project) -> SolvedTrajectory | None:
@@ -110,7 +123,7 @@ def _load_solution(cache: object, robot: Robot, project: Project) -> SolvedTraje
 
 def load_project(path: Path, robot: Robot) -> LoadedProject:
     """读取并校验工程结构；姿态与当前模型的匹配在加载时检查。"""
-    document = ProjectFile.model_validate_json(path.expanduser().resolve().read_bytes())
+    document = ProjectFile.model_validate_json(resolve_path(path).read_bytes())
     if document.joint_names != robot.joint_names:
         raise ValueError("工程的有序关节列表与当前机器人不一致")
     project = document.project.normalized(robot)

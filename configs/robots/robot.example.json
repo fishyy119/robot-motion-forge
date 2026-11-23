@@ -3,6 +3,7 @@
   "robot": {
     "name": "ExampleRobot",
     "repository_root": "/path/to/robot-repository",
+    "project_root": ".robot-motion-forge",
     "model": "robot.xml",
     "joint_limit_overrides": {
       "neck_yaw_joint": [-0.52, 0.52],

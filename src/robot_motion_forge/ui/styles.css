@@ -33,6 +33,17 @@ body {
     font-size: var(--rmf-font-caption) !important;
     color: var(--mantine-color-dimmed);
 }
+/* 通过标签页识别时间轴浮窗，使用 layout.js 按场景边界计算的横向尺寸。 */
+[data-rmf-timeline-bounds] > [data-floating-window]:has([data-dock-tab][title="时间轴"]) {
+    left: var(--rmf-timeline-left) !important;
+    width: var(--rmf-timeline-width) !important;
+
+    /* 左右边缘及四角都能改变宽度。按后缀匹配会同时隐藏这两类手柄。 */
+    & > :is([data-dock-resize$="left"], [data-dock-resize$="right"]) {
+        display: none;
+    }
+}
+/* timeline.js 给可点击的关键帧刻度加标记，长名称以省略号收尾。 */
 [data-rmf-timeline-mark] {
     margin-block-start: var(--rmf-slider-mark-offset);
     max-inline-size: 6rem;
@@ -42,6 +53,7 @@ body {
     pointer-events: auto;
     cursor: pointer;
 
+    /* 悬停或键盘聚焦时，把当前刻度文字提到相邻刻度之上。 */
     &:hover,
     &:focus-visible {
         z-index: 1;
@@ -55,6 +67,7 @@ body {
     min-height: 1.75rem !important;
 }
 /* 控件包装层统一行距，按钮组内部的排列仍由 Viser 管理。 */
+/* 前者包裹带字段标签的控件行，后者包裹独立按钮。 */
 div:has(> .mantine-Flex-root > div > .mantine-Text-root > label),
 div:not(.mantine-Flex-root):has(> .mantine-Button-root[id]) {
     padding-bottom: var(--rmf-space-control) !important;
@@ -63,6 +76,7 @@ div:not(.mantine-Flex-root):has(> .mantine-Button-root[id]) {
 .mantine-Flex-root:has(> div > .mantine-Text-root > label) {
     --rmf-label-width: 7.5rem;
 
+    /* Viser 的字段行将标签包装在前，输入控件包装在最后。 */
     & > div:has(> .mantine-Text-root > label) {
         width: var(--rmf-label-width) !important;
     }
@@ -74,6 +88,7 @@ div:not(.mantine-Flex-root):has(> .mantine-Button-root[id]) {
         flex-wrap: wrap;
         row-gap: 0.25rem;
     }
+    /* 滑块行给长名称留宽，并为滑条和数值框设置换行时的尺寸基准。 */
     &:has(.mantine-Slider-root) {
         --rmf-label-width: 10.5rem;
 
@@ -81,6 +96,7 @@ div:not(.mantine-Flex-root):has(> .mantine-Button-root[id]) {
             flex-basis: 10rem;
         }
     }
+    /* 以 Flex 内的第三个数值框识别三轴输入，为整组三个分量分配宽度。 */
     & > div:has(> .mantine-Flex-root > .mantine-NumberInput-root:nth-child(3)) {
         flex-basis: 15rem;
     }
@@ -101,6 +117,7 @@ div:not(.mantine-Flex-root):has(> .mantine-Button-root[id]) {
     }
 }
 /* 分组标题浮在上边框，外侧间距和内侧留白分别为它预留空间。 */
+/* Viser 以标题 Paper 和紧随其后的折叠内容作为分组容器的直接子元素。 */
 .mantine-Paper-root:has(> .mantine-Paper-root + [aria-hidden]) {
     margin-block: 1.25rem !important;
     padding-bottom: 0.5rem;
@@ -108,6 +125,7 @@ div:not(.mantine-Flex-root):has(> .mantine-Button-root[id]) {
     &:last-child {
         margin-bottom: 0 !important;
     }
+    /* 内层的 Paper 是浮在边框上的标题。 */
     & > .mantine-Paper-root {
         font-size: 1rem;
     }
@@ -139,6 +157,7 @@ div:not(.mantine-Flex-root):has(> .mantine-Button-root[id]) {
         user-select: text;
     }
 }
+/* 编排表使用等宽数字和固定列布局，便于对齐时间并约束长帧名。 */
 [data-rmf-arrangement] {
     font-variant-numeric: tabular-nums;
 
@@ -166,9 +185,11 @@ div:not(.mantine-Flex-root):has(> .mantine-Button-root[id]) {
         width: 3rem;
         text-align: center;
     }
+    /* 对当前关键帧的每个单元格着色，形成整行高亮。 */
     & [data-rmf-current-key] > td {
         background: var(--mantine-primary-color-light);
     }
+    /* 选帧和状态操作嵌在表格里，沿用单元格字体，并提供键盘焦点轮廓。 */
     & button {
         padding: 0;
         border: 0;
@@ -183,6 +204,7 @@ div:not(.mantine-Flex-root):has(> .mantine-Button-root[id]) {
             outline-offset: 2px;
         }
     }
+    /* 帧名按钮铺满名称列的可用宽度，便于点击和换行。 */
     & .rmf-key-name {
         display: block;
         width: 100%;
@@ -193,6 +215,7 @@ div:not(.mantine-Flex-root):has(> .mantine-Button-root[id]) {
             text-decoration: underline;
         }
     }
+    /* 锁定与归零按钮为状态符号留出点击区域，启用时使用主题强调色。 */
     & .rmf-key-state {
         min-width: 1.75rem;
         min-height: 1.5rem;
@@ -206,6 +229,55 @@ div:not(.mantine-Flex-root):has(> .mantine-Button-root[id]) {
         }
     }
 }
+/* 按浏览器可用高度启用紧凑侧栏，让首屏显示更多控件与关键帧。 */
+@media (max-height: 1100px) {
+    [data-dock-region] {
+        --rmf-space-control: 0.375rem;
+        /* 以实际侧栏宽度作为下方容器查询的基准。 */
+        container-type: inline-size;
+
+        /* 沿用默认分组结构，缩减浮动标题周围及折叠内容内的留白。 */
+        & .mantine-Paper-root:has(> .mantine-Paper-root + [aria-hidden]) {
+            margin-block: 0.75rem !important;
+            padding-bottom: 0.25rem;
+
+            &:last-child {
+                margin-bottom: 0 !important;
+            }
+            & > .mantine-Paper-root + [aria-hidden] > div {
+                padding-top: 0.5rem !important;
+            }
+        }
+        /* 减少表格区域和单元格的竖向内边距，增加首屏可见行数。 */
+        & [data-rmf-arrangement] {
+            padding-block: 0.25rem;
+
+            & :is(th, td) {
+                padding-block: 0.125rem;
+            }
+        }
+    }
+
+    /* 侧栏够宽时，将同一组内连续的操作按钮并排，其他控件仍占整行。 */
+    @container (min-width: 20rem) {
+        /* 匹配包含独立按钮包装层的容器，控件默认横跨两列。 */
+        [data-dock-region] div:has(> div > .mantine-Button-root[id]) {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+
+            & > * {
+                grid-column: 1 / -1;
+            }
+            /* 分别匹配后方和前方紧邻另一个按钮的包装层，让它们各占一列。 */
+            & > div:has(> .mantine-Button-root[id]):has(+ div > .mantine-Button-root[id]),
+            & > div:has(> .mantine-Button-root[id]) + div:has(> .mantine-Button-root[id]) {
+                grid-column: auto;
+                min-width: 0;
+            }
+        }
+    }
+}
+/* joint_curves.js 在 uPlot 绘图区内定位当前时刻的标线，鼠标事件穿透到图表。 */
 .rmf-curve-cursor {
     position: absolute;
     inset-block: 0;
@@ -216,6 +288,7 @@ div:not(.mantine-Flex-root):has(> .mantine-Button-root[id]) {
     z-index: 1;
 }
 
+/* 场景菜单和提示由 JS 按视口坐标摆放，浮在场景与停靠面板上方。 */
 .rmf-scene-menu,
 .rmf-scene-tooltip {
     position: fixed;
@@ -248,6 +321,7 @@ div:not(.mantine-Flex-root):has(> .mantine-Button-root[id]) {
     display: grid;
     border-top: 1px solid var(--mantine-color-default-border);
 }
+/* 坐标系菜单把固定模式与控制模式分列显示。 */
 .rmf-frame-menu-groups {
     grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -272,6 +346,7 @@ div:not(.mantine-Flex-root):has(> .mantine-Button-root[id]) {
     &:hover {
         background: var(--mantine-color-default-hover);
     }
+    /* 每项预留勾选符号的位置，让选中和未选中的文字保持对齐。 */
     &::before {
         content: "";
         display: inline-block;

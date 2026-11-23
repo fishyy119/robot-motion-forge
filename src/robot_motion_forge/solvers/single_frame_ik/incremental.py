@@ -1,4 +1,4 @@
-"""Mink / DAQP 增量 IK，支持关节锁定与控制坐标系的世界位姿锚定。"""
+"""Mink / DAQP 单帧增量 IK，支持关节锁定与控制坐标系的世界位姿锚定。"""
 
 # qpsolvers.solve_problem 尚未标注 **kwargs 的类型。
 # pyright: reportUnknownMemberType=false

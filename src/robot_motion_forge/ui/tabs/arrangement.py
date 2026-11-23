@@ -25,6 +25,7 @@ class ArrangementActions(Protocol):
     def delete_key(self, key_id: str) -> None: ...
     def history(self, redo: bool) -> None: ...
     def select_key(self, key_id: str | None) -> None: ...
+    def set_duration(self, duration: float) -> None: ...
     def update_key(
         self,
         key_id: str,
@@ -43,7 +44,7 @@ class _KeyFields(NamedTuple):
 
 
 class ArrangementTab:
-    def __init__(self, controls: Controls) -> None:
+    def __init__(self, controls: Controls, *, duration: float) -> None:
         gui = controls.gui
         self._controls = controls
         self._key_labels: dict[str, str] = {}
@@ -58,12 +59,14 @@ class ArrangementTab:
             self._delete_key_button = controls.button("删除关键帧", disabled=True)
             self._history = gui.add_button_group("历史", options=("撤销", "重做"))
         with gui.add_folder("时间编排"):
+            self._duration = gui.add_number("动作时长 / s", initial_value=duration, step=0.1)
             self._table_click = gui.add_button_group("编排表操作", options=("—",), visible=False)
             self._arrangement = gui.add_html("")
 
     def bind_actions(self, actions: ArrangementActions) -> None:
         self._actions = actions
         controls = self._controls
+        controls.input(self._duration, actions.set_duration)
         controls.click(self._add_key_button, actions.capture)
         controls.click_group(
             self._history, {"撤销": lambda: actions.history(False), "重做": lambda: actions.history(True)}
@@ -121,6 +124,7 @@ class ArrangementTab:
         self._controls.click(self._delete_key_button, lambda: actions.delete_key(key_id))
 
     def refresh(self, project: Project, *, selected_key: str | None, cursor: float) -> None:
+        self._duration.value = project.duration
         keys = sorted(project.keyframes, key=lambda k: k.time)
         self._keys = {key.id: key for key in keys}
         self._key_labels = {f"{k.time:.3f}s · {k.name}": k.id for k in keys}

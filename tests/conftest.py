@@ -39,7 +39,7 @@ def robot(tmp_path: Path) -> Robot:
         encoding="utf-8",
     )
     config = RobotDefinition(
-        robot=ModelConfig(name="test", repository_root=str(tmp_path), model="robot.xml"),
+        robot=ModelConfig(name="test", repository_root=str(tmp_path), project_root="projects", model="robot.xml"),
         home=HomePose(joints_rad={"shoulder": 0.0}, quaternion_wxyz=(1.0, 0.0, 0.0, 0.0)),
         frames={
             "torso": ControlFrame(body="base", fixed_mode="pose"),

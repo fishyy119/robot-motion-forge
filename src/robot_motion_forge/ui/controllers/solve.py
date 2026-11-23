@@ -8,14 +8,14 @@ from threading import Event
 from typing import TYPE_CHECKING
 
 from robot_motion_forge.io.gmr_export import serialize_motion
-from robot_motion_forge.solvers.trajectory.solve import SolveCancelled, optimize
+from robot_motion_forge.solvers.trajectory import SolveCancelled, optimize
 
 if TYPE_CHECKING:
     from concurrent.futures import Executor, Future
 
     from viser import ClientHandle
 
-    from robot_motion_forge.application.editor import Editor
+    from robot_motion_forge.editor import Editor
     from robot_motion_forge.motion.trajectory import SolvedTrajectory
 
     from ..notifications import Notifications, OperationNotification
@@ -52,15 +52,20 @@ class SolveController:
         self._action_state: tuple[bool, bool] | None = None
         self._sync_actions()
 
-    def set_timing(self, *, duration: float | None = None, fps: float | None = None) -> None:
+    def set_export_fps(self, fps: float) -> None:
         self._reset_target()
-        self._editor.set_timing(duration=duration, fps=fps)
+        self._editor.set_timing(fps=fps)
 
-    def export(self, client: ClientHandle) -> None:
+    def export(self, client: ClientHandle, *, adjust_height_to_ground: bool = False) -> None:
         trajectory = self._editor.trajectory
         if trajectory is None:
             raise ValueError("请先求解当前工程")
-        payload = serialize_motion(self._editor.robot, self._editor.project_snapshot(), trajectory)
+        payload = serialize_motion(
+            self._editor.robot,
+            self._editor.project_snapshot(),
+            trajectory,
+            adjust_height_to_ground=adjust_height_to_ground,
+        )
         # Viser 下载流程自带接收完成通知。
         client.send_file_download("motion.pkl", payload, save_immediately=True)
 

@@ -1,4 +1,4 @@
-"""求解页：动作设置、轨迹优化、坐标系轨迹配置与动作导出。"""
+"""求解页：轨迹优化、坐标系轨迹配置与动作导出。"""
 
 from __future__ import annotations
 
@@ -43,8 +43,8 @@ class _TaskInputs(NamedTuple):
 class SolveActions(Protocol):
     def start(self) -> None: ...
     def cancel(self) -> None: ...
-    def export(self, client: ClientHandle) -> None: ...
-    def set_timing(self, *, duration: float | None = None, fps: float | None = None) -> None: ...
+    def export(self, client: ClientHandle, *, adjust_height_to_ground: bool = False) -> None: ...
+    def set_export_fps(self, fps: float) -> None: ...
 
 
 class SolveTab:
@@ -52,13 +52,9 @@ class SolveTab:
         gui = controls.gui
         self._controls = controls
         tasks_enabled = any(task.mode is not None for task in project.frame_tasks.values())
-        with gui.add_folder("动作设置"):
-            self._duration = gui.add_number("动作时长 / s", initial_value=project.duration, step=0.1)
-            self._fps = gui.add_number("导出 FPS", initial_value=project.fps, step=1.0)
         with gui.add_folder("轨迹优化"):
             self._solve_button = controls.button("优化整段轨迹", primary=True)
             self._cancel_button = controls.button("取消求解")
-            self._export_button = controls.button("导出求解 PKL", disabled=True)
             self._terminal_condition = gui.add_dropdown(
                 "终端条件",
                 options=tuple(_TERMINAL_LABELS.values()),
@@ -134,6 +130,12 @@ class SolveTab:
                     )
                     weight.precision = 3
                     self._task_inputs[name] = _TaskInputs(mode, reference, weight)
+        with gui.add_folder("导出"):
+            self._fps = gui.add_number("导出 FPS", initial_value=project.fps, step=1.0)
+            self._adjust_height_to_ground = gui.add_checkbox(
+                "修正基座高度", initial_value=False, disabled=not robot.floating or not robot.support_polygons
+            )
+            self._export_button = controls.button("导出求解 PKL", disabled=True)
 
     def bind_actions(
         self,
@@ -143,8 +145,7 @@ class SolveTab:
         set_frame_task: Callable[[str, FrameTask], None],
     ) -> None:
         controls = self._controls
-        controls.input(self._duration, lambda value: actions.set_timing(duration=value))
-        controls.input(self._fps, lambda value: actions.set_timing(fps=value))
+        controls.input(self._fps, actions.set_export_fps)
         controls.input(
             self._terminal_condition,
             lambda label: set_setting(
@@ -156,7 +157,7 @@ class SolveTab:
         controls.click(self._cancel_button, actions.cancel)
 
         def prepare_export(client: ClientHandle, _target: GuiButtonHandle) -> Callable[[], None]:
-            return partial(actions.export, client)
+            return partial(actions.export, client, adjust_height_to_ground=self._adjust_height_to_ground.value)
 
         # 下载只发送给触发导出的客户端，生成数据仍统一在主线程执行。
         self._export_button.on_click(controls.client_action(prepare_export))
@@ -181,7 +182,7 @@ class SolveTab:
                 handle.on_update(controls.client_action(partial(prepare_task, name)))
 
     def refresh(self, project: Project) -> None:
-        self._duration.value, self._fps.value = project.duration, project.fps
+        self._fps.value = project.fps
         self._terminal_condition.value = _TERMINAL_LABELS[project.settings.terminal_condition]
         self._foot_support.value = project.settings.foot_support
         tasks_enabled = any(task.mode is not None for task in project.frame_tasks.values())

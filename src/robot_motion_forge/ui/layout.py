@@ -39,7 +39,7 @@ class Sidebar:
         gui.main_panel.expand()
         tabs = gui.add_tab_group()
         with tabs.add_tab("编排"):
-            self.arrangement = ArrangementTab(controls)
+            self.arrangement = ArrangementTab(controls, duration=project.duration)
         with tabs.add_tab("姿态"):
             self.pose = PoseTab(controls, robot=robot, qpos=qpos)
         with tabs.add_tab("求解"):
@@ -47,7 +47,7 @@ class Sidebar:
         with tabs.add_tab("关节曲线"):
             self.joint_curves = JointCurvesTab(controls, robot=robot)
         with tabs.add_tab("工程"):
-            self.project = ProjectTab(controls, project_path=project_path)
+            self.project = ProjectTab(controls, project_root=robot.project_root, project_path=project_path)
 
 
 class BottomPanel:
@@ -62,4 +62,4 @@ class BottomPanel:
         self.timeline = TimelineTab(controls, tab=panel.add_tab("时间轴"), project=project, cursor=cursor)
         with panel.add_tab("显示"):
             self.display = DisplayTab(controls)
-        panel.float(x=16, y=-16, width=1200)
+        panel.float(x=16, y=-16)

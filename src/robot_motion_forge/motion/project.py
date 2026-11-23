@@ -125,7 +125,7 @@ class Project(MotionModel):
     def solve_fingerprint(self) -> str:
         # 指纹刻意排除机器人模型，允许模型迭代后复用仍通过校验的求解缓存。
         content: dict[str, object] = {
-            "solver_version": 7,
+            "solver_version": 8,
             "duration": self.duration,
             "settings": self.settings.model_dump(),
             "frame_tasks": {name: task.model_dump() for name, task in self.frame_tasks.items()},

@@ -1,7 +1,10 @@
 """MuJoCo 机器人适配层：运动学、流形运算与限位。没有 UI 依赖。"""
 
-import os
+# MuJoCo 存根的场景元素列表缺少元素类型，调用处按实际元素类型转换。
+# pyright: reportUnknownMemberType=false
+
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import SupportsIndex, cast
 
@@ -11,10 +14,14 @@ import numpy as np
 from numpy.typing import ArrayLike
 
 from robot_motion_forge.utils.array_types import FloatArray
+from robot_motion_forge.utils.paths import resolve_path
 from robot_motion_forge.utils.rotations import normalize_wxyz
 
+from . import GROUND_HEIGHT_M
 from .definition import ControlFrame, RobotDefinition
 from .kinematics import forward_kinematics
+
+JOINT_LIMIT_TOLERANCE = 1e-8
 
 
 @dataclass(frozen=True)
@@ -27,18 +34,18 @@ class SupportPolygon:
 
 
 class Robot:
-    def __init__(self, config: RobotDefinition, *, config_path: Path) -> None:
+    def __init__(self, config: RobotDefinition, *, config_path: str | Path) -> None:
         self.config = config
-        self.config_path = config_path.expanduser().resolve()
-        repository_root = Path(os.path.expandvars(config.robot.repository_root)).expanduser()
-        self.repository_root = (self.config_path.parent / repository_root).resolve()
+        self.config_path = resolve_path(config_path)
+        self.repository_root = resolve_path(config.robot.repository_root, base_dir=self.config_path.parent)
         if not self.repository_root.is_dir():
             raise ValueError(f"找不到机器人仓库目录：{self.repository_root}")
-        model_path = Path(os.path.expandvars(config.robot.model)).expanduser()
-        self.model_path = (self.repository_root / model_path).resolve()
+        self.project_root = resolve_path(config.robot.project_root, base_dir=self.repository_root)
+        self.model_path = resolve_path(config.robot.model, base_dir=self.repository_root)
         if not self.model_path.is_file():
             raise ValueError(f"找不到本地模型：{self.model_path}")
         spec = mj.MjSpec.from_file(str(self.model_path))
+        _isolate_robot(spec)
         for name, bounds in config.robot.joint_limit_overrides.items():
             joint = cast(mj.MjsJoint | None, spec.joint(name))
             if joint is None:
@@ -71,7 +78,7 @@ class Robot:
         self.frame_site_ids = {name: m.site(site).id for name, site in site_names.items()}
         roots = np.flatnonzero(m.body_parentid[1:] == 0) + 1
         if len(roots) != 1:
-            raise ValueError("模型必须只有一个顶层根连杆；请加载纯机器人 MJCF")
+            raise ValueError("提取后的机器人模型必须恰好有一个顶层根连杆")
         self.root_id = int(roots[0])
         if any(np.any(ids == 0) for ids in (m.geom_bodyid, m.site_bodyid, m.cam_bodyid, m.light_bodyid)):
             raise ValueError("模型包含 world 上的几何、site、相机或灯光；请加载纯机器人 MJCF，地面由项目提供")
@@ -135,14 +142,34 @@ class Robot:
     @classmethod
     def load(cls, path: str | Path) -> "Robot":
         """读取本地机器人定义。实际模型、网格与本机配置不随源码分发。"""
-        path = Path(path).expanduser().resolve()
+        config_path = resolve_path(path)
         # JSON5 解析配置文本，Pydantic 随后校验字段与数值。
-        raw = json5.loads(path.read_text(encoding="utf-8"), allow_duplicate_keys=False)
-        return cls(RobotDefinition.model_validate(raw), config_path=path)
+        raw = json5.loads(config_path.read_text(encoding="utf-8"), allow_duplicate_keys=False)
+        return cls(RobotDefinition.model_validate(raw), config_path=config_path)
 
     def copy_spec(self) -> mj.MjSpec:
         """复制已应用关节限位和控制坐标系的 MuJoCo 规格，供组合场景使用。"""
         return self._spec.copy()
+
+    @cached_property
+    def model_with_ground(self) -> mj.MjModel:
+        """供碰撞求解与导出高度修正共用的固定地面模型。"""
+        spec = self.copy_spec()
+        # 地面使用独立默认值，避免继承机器人 MJCF 中的几何、材质或接触设置。
+        ground = mj.MjSpec()
+        ground.worldbody.add_geom(
+            name="floor",
+            type=mj.mjtGeom.mjGEOM_PLANE,
+            pos=(0.0, 0.0, GROUND_HEIGHT_M),
+            size=(0.0, 0.0, 0.05),
+            friction=(1.0, 0.005, 0.0001),
+            # 地面接触所有启用碰撞的机器人几何，不限定机器人使用的掩码位。
+            contype=-1,
+            conaffinity=-1,
+        )
+        # 只在 world 上添加静态几何，机器人 body、joint、actuator 和状态布局保持一致。
+        spec.attach(ground, prefix="rmf_ground/", frame=spec.worldbody.add_frame())
+        return spec.compile()
 
     def body_id(self, name: str) -> int:
         index = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_BODY, name)
@@ -178,14 +205,19 @@ class Robot:
             except ValueError as exc:
                 raise ValueError("根四元数不能为零") from exc
         if limits:
-            outside = np.flatnonzero((qpos[self.qadr] < self.lower - 1e-8) | (qpos[self.qadr] > self.upper + 1e-8))
+            joints = qpos[self.qadr]
+            outside = np.flatnonzero(
+                (joints < self.lower - JOINT_LIMIT_TOLERANCE) | (joints > self.upper + JOINT_LIMIT_TOLERANCE)
+            )
             if len(outside):
                 index = int(outside[0])
                 unit = "m" if self.is_slide_joint(index) else "rad"
                 raise ValueError(
-                    f"关节 {self.joint_names[index]} 超出有效限位：{qpos[self.qadr[index]]:.6g} {unit}，"
+                    f"关节 {self.joint_names[index]} 超出有效限位：{joints[index]:.6g} {unit}，"
                     f"范围 [{self.lower[index]:.6g}, {self.upper[index]:.6g}] {unit}"
                 )
+            # 容差内的舍入误差归入精确限位，锁定姿态也能直接作为求解器的常量。
+            qpos[self.qadr] = np.clip(joints, self.lower, self.upper)
         return qpos
 
     def forward(self, qpos: ArrayLike, data: mj.MjData | None = None) -> mj.MjData:
@@ -215,3 +247,30 @@ class Robot:
         out = np.asarray(reference, dtype=float).copy()
         mj.mj_integratePos(self.model, out, np.asarray(delta, dtype=float), 1.0)
         return out
+
+
+def _isolate_robot(spec: mj.MjSpec) -> None:
+    """保留 world 下第一个顶层连杆的子树，移除场景对象及其接触配置。"""
+    world = spec.worldbody
+    roots = cast(list[mj.MjsBody], world.bodies)
+    world_geoms = cast(list[mj.MjsGeom], world.geoms)
+    world_objects = (
+        *world_geoms,
+        *cast(list[mj.MjsSite], world.sites),
+        *cast(list[mj.MjsCamera], world.cameras),
+        *cast(list[mj.MjsLight], world.lights),
+    )
+    if len(roots) <= 1 and not world_objects:
+        return
+    for root in roots[1:]:
+        spec.delete(root)
+
+    geom_names = {geom.name for geom in world_geoms if geom.name}
+    for pair in cast(list[mj.MjsPair], spec.pairs):
+        if pair.geomname1 in geom_names or pair.geomname2 in geom_names:
+            spec.delete(pair)
+    for exclude in cast(list[mj.MjsExclude], spec.excludes):
+        if world.name in (exclude.bodyname1, exclude.bodyname2):
+            spec.delete(exclude)
+    for obj in world_objects:
+        spec.delete(obj)

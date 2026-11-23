@@ -16,7 +16,7 @@ from robot_motion_forge.robot.support import (
 )
 from robot_motion_forge.utils.array_types import FloatArray
 
-from .parameters import Jacobians, Parameters, PoseLayout, write_jacobians
+from ..parameters import Jacobians, Parameters, PoseLayout, write_jacobians
 
 
 def initial_support_contacts(robot: Robot, data: mj.MjData) -> tuple[FootState, ...]:

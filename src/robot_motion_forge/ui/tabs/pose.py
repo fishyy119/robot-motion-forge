@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from viser import GuiCheckboxHandle, GuiDropdownHandle, GuiNumberHandle, GuiSliderHandle
 
     from robot_motion_forge.motion.pose_constraints import EditConstraints
-    from robot_motion_forge.solvers.drag import DragResult
+    from robot_motion_forge.solvers.single_frame_ik import DragResult
 
     from ..controls import Controls
 
@@ -62,12 +62,15 @@ class PoseTab:
         self._controls = controls
         self._robot = robot
         self._joint_indices = {name: index for index, name in enumerate(robot.joint_names)}
-        self._object_labels = {f"部位 · {name}": PoseSelection("frame", name) for name in robot.frames}
+        self._object_labels: dict[str, PoseSelection | None] = {
+            "无": None,
+            **{f"部位 · {name}": PoseSelection("frame", name) for name in robot.frames},
+        }
         self._object_labels.update({f"关节 · {name}": PoseSelection("joint", name) for name in robot.joint_names})
         self._target_modes: dict[str, GuiDropdownHandle[str]] = {}
         self._joint_locks: dict[str, GuiCheckboxHandle] = {}
         with gui.add_folder("拖拽"):
-            self._object_select = gui.add_dropdown("操作对象", options=tuple(self._object_labels) or ("—",))
+            self._object_select = gui.add_dropdown("操作对象", options=tuple(self._object_labels), initial_value="无")
             state = self.state
             # 每个坐标系的控件直接保留其模式；切换对象只改变显隐，不再维护第二份模式缓存。
             for name, frame in robot.frames.items():
@@ -166,7 +169,7 @@ class PoseTab:
     def selected_object(self) -> PoseSelection | None:
         return self._object_labels.get(self._object_select.value)
 
-    def select_object(self, selection: PoseSelection) -> None:
+    def select_object(self, selection: PoseSelection | None) -> None:
         self._object_select.value = next(label for label, value in self._object_labels.items() if value == selection)
 
     @property

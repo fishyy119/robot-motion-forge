@@ -10,11 +10,11 @@ import pyceres
 from scipy.interpolate import PchipInterpolator
 from scipy.spatial.transform import Rotation
 
-from robot_motion_forge.motion.interpolation import RotationBezier
+from robot_motion_forge.motion.interpolation import RotationHermite
 from robot_motion_forge.utils.array_types import FloatArray
 from robot_motion_forge.utils.rotations import inverse_right_jacobian, rotation_from_wxyz
 
-from .parameters import Jacobians, Parameters, PoseLayout, quaternion_lift, write_jacobians
+from ..parameters import Jacobians, Parameters, PoseLayout, quaternion_lift, write_jacobians
 
 if TYPE_CHECKING:
     from robot_motion_forge.motion.trajectory import ReferenceTrajectory
@@ -44,7 +44,7 @@ def sample_frame_reference(
             positions[:, :2] = PchipInterpolator(keyframes.times, points[1:-1, :2], axis=0)(query)
     orientations = None
     if mode != "position":
-        rotation_curve = RotationBezier(knot_times, Rotation.concatenate([state.orientation for state in states]))
+        rotation_curve = RotationHermite(knot_times, Rotation.concatenate([state.orientation for state in states]))
         orientations = rotation_curve(query)
     return [
         FrameReference(

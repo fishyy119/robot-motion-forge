@@ -9,12 +9,11 @@ import mujoco as mj
 import numpy as np
 import pyceres
 
-from robot_motion_forge.robot import GROUND_HEIGHT_M
 from robot_motion_forge.robot.kinematics import forward_kinematics
 from robot_motion_forge.robot.model import Robot
 from robot_motion_forge.utils.array_types import FloatArray
 
-from .parameters import Jacobians, Parameters, PoseLayout, write_jacobians
+from ..parameters import Jacobians, Parameters, PoseLayout, write_jacobians
 
 # 固定的归一化距离尺度（1 cm），独立于自碰撞安全间隙。
 COLLISION_DISTANCE_SCALE_M = 0.01
@@ -26,22 +25,7 @@ class CollisionModel:
     """纯机器人与固定地面的 MuJoCo 碰撞模型，各求解节点共享。"""
 
     def __init__(self, robot: Robot) -> None:
-        spec = robot.copy_spec()
-        # 地面使用独立默认值，避免继承机器人 MJCF 中的几何、材质或接触设置。
-        ground = mj.MjSpec()
-        ground.worldbody.add_geom(
-            name="floor",
-            type=mj.mjtGeom.mjGEOM_PLANE,
-            pos=(0.0, 0.0, GROUND_HEIGHT_M),
-            size=(0.0, 0.0, 0.05),
-            friction=(1.0, 0.005, 0.0001),
-            # 地面接触所有启用碰撞的机器人几何，不限定机器人使用的掩码位。
-            contype=-1,
-            conaffinity=-1,
-        )
-        # 只在 world 上添加静态几何，机器人 body、joint、actuator 和状态布局保持一致。
-        spec.attach(ground, prefix="rmf_ground/", frame=spec.worldbody.add_frame())
-        self.model: mj.MjModel = spec.compile()
+        self.model = robot.model_with_ground
         self.collision_pairs = np.asarray(self._collision_pairs(), dtype=np.intp).reshape(-1, 2)
         # 纯机器人不含 world 几何，与 world 的碰撞即地面碰撞。
         self.ground_collision_mask = np.any(self.model.geom_bodyid[self.collision_pairs] == 0, axis=1)

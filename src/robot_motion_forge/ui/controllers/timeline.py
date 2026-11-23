@@ -6,7 +6,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from robot_motion_forge.application.editor import Editor
+    from robot_motion_forge.editor import Editor
     from robot_motion_forge.motion.draft import PoseSource
 
     from ..notifications import Notifications
@@ -20,6 +20,10 @@ class TimelineController:
 
     def pause(self) -> None:
         self._playing = False
+
+    def set_duration(self, duration: float) -> None:
+        self._reset_target()
+        self._editor.set_timing(duration=duration)
 
     def _begin_key_edit(self) -> None:
         self.pause()

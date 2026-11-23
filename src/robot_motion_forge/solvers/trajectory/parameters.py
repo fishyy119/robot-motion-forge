@@ -98,7 +98,13 @@ class PoseLayout:
 
 
 class KnotVelocityMap:
-    """将有界关节速度映射到 [0, 1]，使相邻区间的 Bézier 控制点均满足限位。"""
+    """将有限位关节的节点速度参数化为 [0, 1] 内的比例。
+
+    用三次 Hermite 曲线估计相邻节点之间的关节运动。同一条曲线可等价表示为
+    三次 Bézier 曲线。节点 q 附近的出段控制点为 q + h_out * v / 3，
+    入段控制点为 q - h_in * v / 3，其中 v 是节点速度，h_out 和 h_in 是对应区间的时长。
+    由凸包性质，只要每段的四个控制点均满足位置限位，段内关节位置也满足限位。
+    """
 
     def __init__(self, robot: Robot, incoming: float | None, outgoing: float | None, *, stopped: bool) -> None:
         limited = np.isfinite(robot.lower)

@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 
-from robot_motion_forge.application.editor import Editor
-from robot_motion_forge.application.workspace import Workspace
+from robot_motion_forge.editor import Editor
+from robot_motion_forge.io.project_file import resolve_project_path
 
 from .controllers.pose import PoseController
 from .controllers.solve import SolveController
@@ -22,7 +22,7 @@ from .layout import BottomPanel, Sidebar
 from .notifications import Notifications
 from .scene.gizmo import DragControls
 from .scene.robot_view import RobotView
-from .theme import THEME_STYLE, apply_theme
+from .theme import apply_theme
 from .viser_bridge import register_browser_extensions
 
 if TYPE_CHECKING:
@@ -45,14 +45,12 @@ class ForgeApp:
         self,
         editor: Editor,
         *,
-        workspace: Workspace,
         project_path: Path,
         host: str = "127.0.0.1",
         port: int = 8080,
     ) -> None:
         import viser
 
-        self._workspace = workspace
         self.server = viser.ViserServer(host=host, port=port)
         register_browser_extensions(self.server)
         self.editor = editor
@@ -104,7 +102,6 @@ class ForgeApp:
         self._draft, self._draft_revision = draft, e.draft_revision
         self._display_project = project
         self._display_project_revision = e.project_revision
-        gui.add_html(THEME_STYLE)
         self.sidebar = Sidebar(controls, robot=e.robot, project=project, qpos=draft.qpos, project_path=project_path)
         gui.add_html(
             self.sidebar.pose.scene_menu_metadata(
@@ -154,22 +151,25 @@ class ForgeApp:
         )
         self.bottom_panel.display.bind_actions(change_theme=self._change_theme)
 
-    def _save_project(self, filename: str) -> str:
-        path = self._workspace.project_path(filename)
+    def _save_project(self, relative_path: str) -> str:
+        project_root = self.editor.robot.project_root
+        path = resolve_project_path(project_root, relative_path)
         self.editor.save(path)
-        self._notifications.show("工程已保存", path.name)
-        return path.name
+        saved_path = path.relative_to(project_root).as_posix()
+        self._notifications.show("工程已保存", saved_path)
+        return saved_path
 
-    def _reload_project(self, filename: str) -> None:
-        path = self._workspace.project_path(filename)
-        editor = Editor.load(self.editor.robot, path)
+    def _reload_project(self, relative_path: str) -> None:
+        robot = self.editor.robot
+        path = resolve_project_path(robot.project_root, relative_path)
+        editor = Editor.load(robot, path)
         self.solve.close("工程已重新加载")
         self.drag.hide()
         self.editor = editor
         self.server.gui.reset()
         self.view.bind_gui()
         self._build(path)
-        self._notifications.show("工程已重新加载", path.name)
+        self._notifications.show("工程已重新加载", path.relative_to(robot.project_root).as_posix())
 
     def _change_theme(self) -> None:
         self.dark_mode = not self.dark_mode

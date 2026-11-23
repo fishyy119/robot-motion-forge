@@ -14,11 +14,11 @@ from robot_motion_forge.robot.kinematics import ControlFrameKinematics
 from robot_motion_forge.robot.model import Robot
 from robot_motion_forge.utils.array_types import FloatArray
 
-from .collision import CollisionCost, collision_model_for
+from .costs.collision import CollisionCost, collision_model_for
+from .costs.reference import FrameReferenceCost, LinearReferenceCost, RotationReferenceCost, sample_frame_reference
+from .costs.smoothness import SmoothnessCost
+from .costs.support import SupportCost, initial_support_contacts
 from .parameters import KnotVelocityMap, PoseLayout
-from .reference import FrameReferenceCost, LinearReferenceCost, RotationReferenceCost, sample_frame_reference
-from .smoothness import SmoothnessCost
-from .support import SupportCost, initial_support_contacts
 
 
 class SolveCancelled(RuntimeError):

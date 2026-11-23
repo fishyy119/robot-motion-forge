@@ -16,7 +16,7 @@ from ..scene.gizmo import JointTarget
 if TYPE_CHECKING:
     from viser import ClientHandle
 
-    from robot_motion_forge.application.editor import Editor
+    from robot_motion_forge.editor import Editor
     from robot_motion_forge.motion.draft import Draft
     from robot_motion_forge.motion.pose_constraints import EditConstraints, PoseTarget
     from robot_motion_forge.robot.definition import ControlMode
@@ -97,7 +97,7 @@ class PoseController:
     def select_at(self, ray_origin: ArrayLike, ray_direction: ArrayLike) -> None:
         selection = self._view.pick(ray_origin, ray_direction)
         # 重复点击同一对象保留现有拖拽目标。
-        if selection is not None and selection != self._tab.selected_object:
+        if selection != self._tab.selected_object:
             self._tab.select_object(selection)
 
     def set_joint_locked(self, name: str, locked: bool) -> None:

@@ -9,15 +9,15 @@ from time import monotonic
 import numpy as np
 from numpy.typing import ArrayLike
 
-from robot_motion_forge.io.project_file import load_project, save_project
-from robot_motion_forge.motion.draft import Draft, PoseSource
-from robot_motion_forge.motion.pose_constraints import EditConstraints, PoseTarget
-from robot_motion_forge.motion.project import FrameTask, Keyframe, Project, SolverSettings
-from robot_motion_forge.motion.trajectory import ReferenceTrajectory, SolvedTrajectory, validate_trajectory
-from robot_motion_forge.robot.definition import ControlMode
-from robot_motion_forge.robot.model import Robot
-from robot_motion_forge.solvers.drag import DragResult, follow_target
-from robot_motion_forge.utils.array_types import FloatArray
+from .io.project_file import load_project, save_project
+from .motion.draft import Draft, PoseSource
+from .motion.pose_constraints import EditConstraints, PoseTarget
+from .motion.project import FrameTask, Keyframe, Project, SolverSettings
+from .motion.trajectory import ReferenceTrajectory, SolvedTrajectory, validate_trajectory
+from .robot.definition import ControlMode
+from .robot.model import Robot
+from .solvers.single_frame_ik import DragResult, follow_target
+from .utils.array_types import FloatArray
 
 
 @dataclass(frozen=True)

@@ -25,11 +25,13 @@ def register_browser_extensions(server: ViserServer) -> None:
     root = Path(__file__).parent
     scripts = (
         "viser_bridge.js",
+        "layout.js",
         "scene/interactions.js",
         "tabs/arrangement.js",
         "tabs/timeline.js",
         "tabs/joint_curves.js",
     )
     code = "\n".join((root / name).read_text(encoding="utf-8") for name in scripts)
-    source = f"(() => {{\n{code}\n}})();"
+    stylesheet = json_for_script((root / "styles.css").read_text(encoding="utf-8"))
+    source = f"((css) => {{\n{code}\n}})({stylesheet});"
     server._websock_server.queue_message(_messages.RunJavascriptMessage(source=source))  # pyright: ignore[reportPrivateUsage]

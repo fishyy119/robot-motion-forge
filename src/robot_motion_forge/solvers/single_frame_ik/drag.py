@@ -15,7 +15,7 @@ from robot_motion_forge.robot.model import Robot
 from robot_motion_forge.utils.array_types import FloatArray
 from robot_motion_forge.utils.rotations import rotation_from_wxyz, rotation_to_wxyz
 
-from .ik import ConstraintSpace, PoseIK
+from .incremental import ConstraintSpace, PoseIK
 
 
 @dataclass
@@ -66,7 +66,6 @@ def follow_target(
     position_tolerance = min(position_tolerance, position_step * 0.25)
     orientation_tolerance = min(orientation_tolerance, rotation_step * 0.25)
     qpos = robot.validate_qpos(qpos)
-    qpos[robot.qadr] = np.clip(qpos[robot.qadr], robot.lower, robot.upper)
     m = robot.model
     constraints = constraints if constraints is not None else EditConstraints()
     target.validate(robot)

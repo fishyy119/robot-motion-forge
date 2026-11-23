@@ -29,11 +29,10 @@ class DefinitionModel(BaseModel):
 
 class ModelConfig(DefinitionModel):
     name: Name = Field(description="机器人显示名称")
-    repository_root: Name = Field(
-        description="机器人仓库根目录；支持相对本定义的路径、~ 和环境变量；工程默认保存在该目录的 .robot-motion-forge 子目录"
-    )
+    repository_root: Name = Field(description="机器人仓库根目录；支持相对本定义的路径、~ 和环境变量")
+    project_root: Name = Field(description="工程文件根目录；相对机器人仓库根目录解析，也支持绝对路径、~ 和环境变量")
     model: Name = Field(
-        description="本地纯机器人 MJCF 路径，不含地面等场景对象；相对机器人仓库根目录解析，也支持绝对路径、~ 和环境变量"
+        description="本地 MJCF 路径，支持单机器人模型或可提取单个机器人的场景；相对机器人仓库根目录解析，也支持绝对路径、~ 和环境变量"
     )
     joint_limit_overrides: dict[Name, JointRange] = Field(
         default_factory=dict,

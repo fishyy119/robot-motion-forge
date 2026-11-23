@@ -1,8 +1,7 @@
-"""原生 Viser 主题，以及 Python API 未提供配置入口的排版与文字对比度。"""
+"""Viser 原生主题与机器人配色。"""
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -33,6 +32,3 @@ def apply_theme(gui: GuiApi, *, dark_mode: bool) -> None:
         show_share_button=False,
         brand_color=accent_color(dark_mode),
     )
-
-
-THEME_STYLE = f"<style>{Path(__file__).with_name('styles.css').read_text(encoding='utf-8')}</style>"

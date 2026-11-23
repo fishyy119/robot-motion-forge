@@ -8,11 +8,12 @@
 
 ## 定义任务机器人
 
-以 [机器人配置样例](configs/robots/robot.example.json) 为起点创建本机配置，编辑器加载本地的 MuJoCo MJCF。MJCF 使用只有一个根连杆的开链结构，平地由编辑器添加，模型文件只包含机器人。
+以 [机器人配置样例](configs/robots/robot.example.json) 为起点创建本机配置，编辑器从本地的 MuJoCo MJCF 加载一个开链机器人。场景中的其他内容会在编译前移除，MJCF 有多个顶层 `<body>` 时，编辑器按声明顺序保留第一个及其子树。
 
 - `robot:` 机器人模型。
   - `name:` 编辑器中显示的机器人名称。
   - `repository_root:` 机器人仓库根目录。相对路径以配置文件所在目录为基准。
+  - `project_root` 设置工程根目录，必填。可使用绝对路径，或相对于 `robot.repository_root` 的路径。
   - `model:` 机器人 MJCF 路径。相对路径以机器人仓库根目录为基准。
   - `joint_limit_overrides:` 按关节名覆盖模型的位置限位。
 - `home:` 新工程的初始姿态。省略的值沿用模型初始状态。
@@ -39,12 +40,12 @@
 
 ```shell
 robot-motion-forge # 采用默认机器人 configs/robots/robot.json 启动
-robot-motion-forge --robot <path-to-robot.json> --project <name-of-project.json>  # 指定机器人与加载工程
+robot-motion-forge --robot <path-to-robot.json> --project <project-path>  # 指定机器人与加载工程
 ```
 
-程序固定将工程保存在本地机器人资产目录 `<robot.repository_root>/.robot-motion-forge/`，不支持其他路径。
+`--project` 参数以 `@/` 开头时，路径将相对于 `robot.project_root` 解析。工程文件必须保存在 `robot.project_root` 内。
 
-程序生命周期中机器人模型固定，工程可以在在「工程」页进行加载、保存、替换等操作。
+程序生命周期中机器人模型固定。在「工程」页可使用相对于 `robot.project_root` 的路径加载、保存或替换工程。
 
 ## 编辑关键帧
 
@@ -78,3 +79,7 @@ robot-motion-forge --robot <path-to-robot.json> --project <name-of-project.json>
 | 足部支撑 | 惩罚支撑足的贴地与水平误差，以及质心投影的支撑裕量不足。该项采用准静态判据，**不适用**于步行等动态动作。 |
 
 以上约束可以通过将权重设为 0 关闭。
+
+### PKL 导出
+
+「修正基座高度」默认关闭。开启后，使用与 GMR 相同的估计逻辑修正基座高度。

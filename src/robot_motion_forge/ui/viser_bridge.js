@@ -4,6 +4,11 @@ if (window[extensions]) return;
 window[extensions] = true;
 document.title = "Robot Motion Forge";
 
+// 样式随页面初始化，侧栏收起后仍然生效。
+const stylesheet = document.createElement("style");
+stylesheet.textContent = css;
+document.head.append(stylesheet);
+
 const rmfViser = (() => {
     function* reactFibers(element) {
         // HTML 控件中的自定义节点无 React 句柄，从最近的宿主元素开始。

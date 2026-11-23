@@ -81,6 +81,7 @@ class DragControls:
             line_width=4.0,
             disable_rotations=True,
             depth_test=False,
+            visible=False,
         )
         self.requested = server.scene.add_icosphere(
             "/drag/requested", radius=0.005, color=(255, 166, 64), visible=False

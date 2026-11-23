@@ -9,13 +9,13 @@ from typing import Literal
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 from scipy.interpolate import PchipInterpolator
-from scipy.spatial.transform import Rotation, Slerp
+from scipy.spatial.transform import Slerp
 
-from robot_motion_forge.robot.model import Robot
+from robot_motion_forge.robot.model import JOINT_LIMIT_TOLERANCE, Robot
 from robot_motion_forge.utils.array_types import FloatArray
-from robot_motion_forge.utils.rotations import log_end_tangent, rotation_from_wxyz, rotation_to_wxyz
+from robot_motion_forge.utils.rotations import rotation_from_wxyz, rotation_to_wxyz
 
-from .interpolation import RotationBezier, hermite_basis, segment_coordinates
+from .interpolation import RotationHermite, hermite_basis, segment_coordinates
 from .types import TerminalCondition
 
 
@@ -53,7 +53,7 @@ class ReferenceTrajectory(_TrajectoryNodes):
             return self.times, self.qpos
         first, last = self.times[0], self.times[-1]
         if self.terminal_condition == "rest":
-            # 延续首尾姿态，PCHIP 和球面 Bézier 在两端的切线都为零。
+            # 延续首尾姿态，PCHIP 和 Log-Hermite 在两端的切线都为零。
             duration = last - first
             times = np.r_[first - duration, self.times, last + duration]
             return times, np.vstack((self.qpos[0], self.qpos, self.qpos[-1]))
@@ -78,11 +78,11 @@ class ReferenceTrajectory(_TrajectoryNodes):
         return result
 
     @cached_property
-    def _rotation_curve(self) -> Slerp | RotationBezier:
+    def _rotation_curve(self) -> Slerp | RotationHermite:
         times, poses = self.interpolation_knots
         orientations = rotation_from_wxyz(poses[:, 3:7])
         if self.terminal_condition is not None:
-            return RotationBezier(times, orientations)
+            return RotationHermite(times, orientations)
         return Slerp(times, orientations)
 
     def sample(self, robot: Robot, times: ArrayLike) -> FloatArray:
@@ -101,7 +101,7 @@ class ReferenceTrajectory(_TrajectoryNodes):
         qvel[:, robot.linear_qvel_indices] = linear_velocity[:, robot.linear_qpos_indices]
         if robot.floating:
             rotation_curve = self._rotation_curve
-            if isinstance(rotation_curve, RotationBezier):
+            if isinstance(rotation_curve, RotationHermite):
                 orientation, spatial_velocity = rotation_curve.sample_with_velocity(query)
                 # MuJoCo 的基座角速度在基座局部坐标系中表达。
                 angular_velocity = orientation.inv().apply(spatial_velocity)
@@ -129,11 +129,10 @@ class SolvedTrajectory(_TrajectoryNodes):
         object.__setattr__(self, "qvel", _readonly(self.qvel))
 
     @cached_property
-    def _angular_segments(self) -> tuple[Rotation, FloatArray, FloatArray, FloatArray]:
+    def _rotation_curve(self) -> RotationHermite:
         rotations = rotation_from_wxyz(self.qpos[:, 3:7])
-        delta = (rotations[1:] * rotations[:-1].inv()).as_rotvec()
         omega = rotations.apply(self.qvel[:, 3:6])
-        return rotations[:-1], delta, omega[:-1], log_end_tangent(delta, omega[1:])
+        return RotationHermite(self.times, rotations, angular_velocities=omega)
 
     def _segment_coordinates(self, times: ArrayLike) -> tuple[NDArray[np.intp], FloatArray, FloatArray]:
         left, step, u = segment_coordinates(self.times, self._query_times(times))
@@ -142,7 +141,8 @@ class SolvedTrajectory(_TrajectoryNodes):
     def sample(self, robot: Robot, times: ArrayLike) -> FloatArray:
         left, step, u = self._segment_coordinates(times)
         right = left + 1
-        displacement, start_tangent, end_tangent = hermite_basis(u, step)
+        weights = hermite_basis(u, step)
+        displacement, start_tangent, end_tangent = weights
         result = self.qpos[left].copy()
         qidx = robot.linear_qpos_indices
         vidx = robot.linear_qvel_indices
@@ -152,9 +152,7 @@ class SolvedTrajectory(_TrajectoryNodes):
             + end_tangent * self.qvel[right][:, vidx]
         )
         if robot.floating:
-            rotations, delta, omega, end = self._angular_segments
-            vector = displacement * delta[left] + start_tangent * omega[left] + end_tangent * end[left]
-            result[:, 3:7] = rotation_to_wxyz(Rotation.from_rotvec(vector) * rotations[left])
+            result[:, 3:7] = rotation_to_wxyz(self._rotation_curve.sample_segments(left, weights))
         return result
 
     def sample_joint_velocities(self, robot: Robot, times: ArrayLike) -> FloatArray:
@@ -179,9 +177,26 @@ def validate_trajectory(robot: Robot, duration: float, trajectory: Trajectory) -
         raise ValueError("轨迹必须覆盖完整动作时长")
     if trajectory.qpos.shape != (len(times), robot.model.nq):
         raise ValueError("轨迹 qpos 维度与模型不一致")
-    if isinstance(trajectory, SolvedTrajectory) and (
-        trajectory.qvel.shape != (len(times), robot.model.nv) or not np.isfinite(trajectory.qvel).all()
-    ):
-        raise ValueError("轨迹 qvel 必须与模型维度一致且只包含有限数值")
     for qpos in trajectory.qpos:
         robot.validate_qpos(qpos)
+    if not isinstance(trajectory, SolvedTrajectory):
+        return
+    if trajectory.qvel.shape != (len(times), robot.model.nv) or not np.isfinite(trajectory.qvel).all():
+        raise ValueError("轨迹 qvel 必须与模型维度一致且只包含有限数值")
+
+    # 沿用求解器的 Bézier 控制点条件，验证三次 Hermite 曲线的段内关节位置。
+    limited = np.flatnonzero(np.isfinite(robot.lower))
+    positions = trajectory.qpos[:, robot.qadr[limited]]
+    velocities = trajectory.qvel[:, robot.vadr[limited]]
+    step = np.diff(times)[:, None] / 3
+    outgoing = positions[:-1] + step * velocities[:-1]
+    incoming = positions[1:] - step * velocities[1:]
+    lower = robot.lower[limited] - JOINT_LIMIT_TOLERANCE
+    upper = robot.upper[limited] + JOINT_LIMIT_TOLERANCE
+    outside = np.argwhere((np.minimum(outgoing, incoming) < lower) | (np.maximum(outgoing, incoming) > upper))
+    if len(outside):
+        segment, joint = outside[0]
+        name = robot.joint_names[limited[joint]]
+        raise ValueError(
+            f"关节 {name} 在 {times[segment]:.6g}–{times[segment + 1]:.6g} s 区间的 Hermite 控制点超出位置限位"
+        )

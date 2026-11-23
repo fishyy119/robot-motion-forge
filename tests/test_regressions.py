@@ -6,16 +6,17 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from robot_motion_forge.application.editor import Editor
+from robot_motion_forge.editor import Editor
+from robot_motion_forge.motion.interpolation import RotationHermite
 from robot_motion_forge.motion.pose_constraints import (
     ANCHOR_ORIENTATION_TOLERANCE_RAD,
     ANCHOR_POSITION_TOLERANCE_M,
     PoseTarget,
 )
 from robot_motion_forge.motion.project import Keyframe, Project
-from robot_motion_forge.motion.trajectory import SolvedTrajectory
+from robot_motion_forge.motion.trajectory import SolvedTrajectory, validate_trajectory
 from robot_motion_forge.robot.model import Robot
-from robot_motion_forge.solvers.trajectory.solve import optimize
+from robot_motion_forge.solvers.trajectory import optimize
 from robot_motion_forge.utils.rotations import rotation_from_wxyz, rotation_to_wxyz
 
 
@@ -89,14 +90,20 @@ def test_optimization_preserves_authored_poses_times_and_joint_limits(robot: Rob
     pose = robot.home.copy()
     pose[3:7] = rotation_to_wxyz(Rotation.from_euler("z", 180, degrees=True))
     shoulder = robot.joint_names.index("shoulder")
-    pose[robot.qadr[shoulder]] = robot.upper[shoulder]
-    project.keyframes.append(Keyframe(time=0.1000000001, qpos=pose.tolist(), name="动作顶点"))
+    shoulder_qpos = robot.qadr[shoulder]
+    pose[shoulder_qpos] = robot.upper[shoulder]
+    peak = Keyframe(time=0.1000000001, qpos=pose.tolist(), name="动作顶点")
+    # 容差内的录入舍入误差应在锁定姿态进入求解器前归到精确限位。
+    peak.qpos[shoulder_qpos] += 5e-9
+    project.keyframes.append(peak)
 
     trajectory = optimize(robot, project)
     for key in project.keyframes:
         assert key.time in trajectory.times
         sampled = trajectory.sample(robot, [key.time])[0]
-        assert np.linalg.norm(robot.difference(key.qpos, sampled)) < 1e-9
+        expected = pose if key.id == peak.id else key.qpos
+        assert np.linalg.norm(robot.difference(expected, sampled)) < 1e-9
+    assert trajectory.sample(robot, peak.time)[0, shoulder_qpos] == robot.upper[shoulder]
     assert np.allclose(trajectory.qvel[[0, -1]], 0.0, atol=1e-9)
 
     frames = trajectory.sample(robot, np.linspace(0, project.duration, 200))
@@ -106,6 +113,23 @@ def test_optimization_preserves_authored_poses_times_and_joint_limits(robot: Rob
     orientations = rotation_from_wxyz(frames[:, 3:7])
     angular_path = (orientations[:-1].inv() * orientations[1:]).magnitude().sum()
     assert angular_path < np.deg2rad(30)
+
+
+def test_translation_loop_preserves_displacement_and_shared_velocity(robot: Robot, project: Project) -> None:
+    project.settings.terminal_condition = "translation_loop"
+    # 只保留加速度代价，使水平等速运动成为已知解。
+    project.settings.velocity = 0.0
+    project.settings.self_collision = 0.0
+    project.settings.ground_collision = 0.0
+    displacement = np.array([0.36, 0.12])
+    project.keyframes[-1].qpos[:2] = (np.asarray(project.keyframes[0].qpos[:2]) + displacement).tolist()
+
+    trajectory = optimize(robot, project)
+    start, end = trajectory.qpos[0], trajectory.qpos[-1]
+    np.testing.assert_allclose(end[:2] - start[:2], displacement, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(robot.difference(start, end)[2:], 0.0, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(trajectory.qvel[0], trajectory.qvel[-1], rtol=0, atol=1e-12)
+    np.testing.assert_allclose(trajectory.qvel[0, :2], displacement / project.duration, rtol=0, atol=1e-6)
 
 
 def test_project_restores_draft_joint_locks_and_solution(robot: Robot, project: Project, tmp_path: Path) -> None:
@@ -149,3 +173,39 @@ def test_solved_trajectory_samples_joint_positions_and_velocities(robot: Robot) 
     velocities = trajectory.sample_joint_velocities(robot, times)[:, shoulder]
     np.testing.assert_allclose(positions, times**3 + 0.2 * times, rtol=0, atol=1e-12)
     np.testing.assert_allclose(velocities, 3 * times**2 + 0.2, rtol=0, atol=1e-12)
+
+
+def test_trajectory_validation_checks_hermite_control_points(robot: Robot) -> None:
+    shoulder = robot.joint_names.index("shoulder")
+    qidx, vidx = robot.qadr[shoulder], robot.vadr[shoulder]
+    upper = robot.upper[shoulder]
+    times = np.array([0.0, 0.6])
+    qpos = np.tile(robot.home, (len(times), 1))
+    qpos[:, qidx] = upper - 0.1
+    qvel = np.zeros((len(times), robot.model.nv))
+    validate_trajectory(robot, 0.6, SolvedTrajectory(times, qpos, qvel, converged=True, message=""))
+
+    # 分别使出段或入段控制点越界，曲线的实际峰值仍在限位内。
+    for node, velocity, peak_time in ((0, 0.6, 0.2), (1, -0.6, 0.4)):
+        rates = qvel.copy()
+        rates[node, vidx] = velocity
+        trajectory = SolvedTrajectory(times, qpos, rates, converged=True, message="")
+        assert trajectory.sample(robot, peak_time)[0, qidx] < upper
+        with pytest.raises(ValueError, match="Hermite 控制点超出位置限位"):
+            validate_trajectory(robot, 0.6, trajectory)
+
+
+def test_rotation_hermite_matches_terminal_spatial_velocity() -> None:
+    times = np.array([0.0, 0.6])
+    orientations = Rotation.from_rotvec([[0.0, 0.0, 0.0], [0.0, 0.0, np.pi / 2]])
+    angular_velocities = np.array([[0.0, 0.0, 0.0], [0.8, -0.3, 0.2]])
+    curve = RotationHermite(times, orientations, angular_velocities=angular_velocities)
+    _, velocities = curve.sample_with_velocity(times[-1:])
+    np.testing.assert_allclose(velocities[0], angular_velocities[-1], rtol=0, atol=1e-12)
+
+    # 对实际采样的朝向做二阶后向差分，独立核对末端空间角速度。
+    step = 1e-5
+    samples = curve(times[-1] - step * np.array([1.0, 2.0]))
+    offsets = (orientations[-1] * samples.inv()).as_rotvec()
+    terminal_velocity = (4 * offsets[0] - offsets[1]) / (2 * step)
+    np.testing.assert_allclose(terminal_velocity, angular_velocities[-1], rtol=0, atol=1e-7)
