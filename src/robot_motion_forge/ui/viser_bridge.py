@@ -33,5 +33,11 @@ def register_browser_extensions(server: ViserServer) -> None:
     )
     code = "\n".join((root / name).read_text(encoding="utf-8") for name in scripts)
     stylesheet = json_for_script((root / "styles.css").read_text(encoding="utf-8"))
-    source = f"((css) => {{\n{code}\n}})({stylesheet});"
+    # 包装器负责提前退出，初始化函数由桥接脚本声明。
+    source = (
+        "((css) => {\n"
+        "if (!initializeBrowserExtensions(css)) return;\n"
+        f"{code}\n"
+        f"}})({stylesheet});"
+    )
     server._websock_server.queue_message(_messages.RunJavascriptMessage(source=source))  # pyright: ignore[reportPrivateUsage]

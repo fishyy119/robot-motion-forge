@@ -1,8 +1,21 @@
 /* 补足控制点置顶、拾取优先级、悬停高亮与提示和右键菜单。 */
 (() => {
-    function install(viewer, current, canvas, store) {
+    /**
+     * @typedef {{
+     *     frames: Record<string, { name: string, dropdowns: Record<string, string> } | undefined>,
+     *     joints: Record<string, string | undefined>,
+     *     bodies: Record<string, string[] | undefined>,
+     *     gizmo: string,
+     * }} SceneMenuConfig
+     * @typedef {Map<ViserBrowser.SceneObject, string>} SceneTargets
+     */
+
+    /** @type {ViserBrowser.SceneReady} */
+    const install = (viewer, current, canvas, store) => {
         const state = store.getState();
+        /** @type {string | null | undefined} */
         let menuText;
+        /** @type {SceneMenuConfig | undefined} */
         let menuConfig;
         function readMenuConfig() {
             const text = document.querySelector("[data-rmf-scene-menu]")?.textContent;
@@ -13,6 +26,10 @@
             return menuConfig;
         }
 
+        /**
+         * @param {ViserBrowser.SceneObject | null} object
+         * @param {SceneTargets} targets
+         */
         function targetName(object, targets) {
             for (let node = object; node; node = node.parent) {
                 const name = targets.get(node);
@@ -20,6 +37,7 @@
             }
         }
 
+        /** @param {ViserBrowser.SceneObject | null} object */
         function visible(object) {
             for (let node = object; node; node = node.parent) {
                 if (!node.visible) return false;
@@ -29,22 +47,32 @@
 
         const raycaster = new state.raycaster.constructor();
         const pointerNdc = state.pointer.clone();
+        /** @param {string[]} names */
         function sceneTargets(names) {
             const refs = viewer.mutable.current.nodeRefFromName;
+            /** @type {SceneTargets} */
             const targets = new Map();
             for (const name of names) {
-                const ref = refs[name];
-                const root = ref?.current ?? ref;
+                const root = rmfViser.sceneObject(refs[name]);
                 if (root?.traverse) targets.set(root, name);
             }
             return targets;
         }
 
+        /**
+         * @param {SceneTargets} targets
+         * @param {number} x
+         * @param {number} y
+         * @param {SceneMenuConfig} config
+         */
         function pickTarget(targets, x, y, config) {
             const bounds = canvas.getBoundingClientRect();
             if (x < bounds.left || x >= bounds.right || y < bounds.top || y >= bounds.bottom) return;
+            const camera = viewer.mutable.current.camera;
+            if (!camera) return;
             pointerNdc.set((x - bounds.left) / bounds.width * 2 - 1, 1 - (y - bounds.top) / bounds.height * 2);
-            raycaster.setFromCamera(pointerNdc, viewer.mutable.current.camera);
+            raycaster.setFromCamera(pointerNdc, camera);
+            /** @type {{ name: string, object: ViserBrowser.SceneObject } | undefined} */
             let nearest;
             for (const { object } of raycaster.intersectObjects([...targets.keys()], true)) {
                 const name = targetName(object, targets);
@@ -59,16 +87,18 @@
             return nearest;
         }
 
+        /** @type {ViserBrowser.SceneMesh | undefined} */
         let outline;
+        /** @param {ViserBrowser.SceneObject} [marker] */
         function highlightMarker(marker) {
             if (outline?.parent === marker) return;
             outline?.removeFromParent();
-            if (!marker) return;
+            if (!marker?.isMesh || Array.isArray(marker.material)) return;
             if (!outline) {
                 // 先绘制扩大的轮廓，再由控制点自身覆盖中间区域，保留固定状态与主题颜色。
                 const material = marker.material.clone();
-                material.color.setHex(0x000000);
-                material.emissive.setHex(0xfbff00);
+                material.color?.setHex(0x000000);
+                material.emissive?.setHex(0xfbff00);
                 material.toneMapped = false;
                 material.depthTest = material.depthWrite = false;
                 material.transparent = true;
@@ -90,6 +120,11 @@
         tooltip.hidden = true;
         document.body.append(menu, tooltip);
 
+        /**
+         * @param {HTMLElement} element
+         * @param {number} x
+         * @param {number} y
+         */
         function placePopup(element, x, y) {
             element.hidden = false;
             const rect = element.getBoundingClientRect();
@@ -97,6 +132,7 @@
             element.style.top = `${Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))}px`;
         }
 
+        /** @type {{ x: number, y: number } | undefined} */
         let hoverPosition;
         const clearHover = () => {
             hoverPosition = undefined;
@@ -106,6 +142,7 @@
                 current.requestRender();
             }
         };
+        /** @param {PointerEvent} event */
         const hover = event => {
             if (event.buttons || !menu.hidden) {
                 clearHover();
@@ -121,6 +158,10 @@
         }
         window.addEventListener("blur", clearHover);
 
+        /**
+         * @param {ViserBrowser.GuiConfig} config
+         * @param {string} text
+         */
         function menuButton(config, text) {
             const toggle = config.type === "GuiCheckboxMessage";
             const selected = toggle ? config.value : config.value === text;
@@ -141,6 +182,7 @@
             return button;
         }
 
+        /** @param {Record<string, string>} dropdowns */
         function frameMenu(dropdowns) {
             const groups = document.createElement("div");
             groups.className = "rmf-frame-menu-groups";
@@ -160,11 +202,17 @@
             return groups;
         }
 
+        /**
+         * @param {string[]} names
+         * @param {SceneMenuConfig["joints"]} checkboxes
+         */
         function jointMenu(names, checkboxes) {
             const items = document.createElement("div");
             items.className = "rmf-joint-menu";
             for (const name of names) {
-                const config = rmfViser.guiConfig(viewer, checkboxes[name]);
+                const uuid = checkboxes[name];
+                if (uuid === undefined) continue;
+                const config = rmfViser.guiConfig(viewer, uuid);
                 if (config?.type !== "GuiCheckboxMessage") continue;
                 items.appendChild(menuButton(config, names.length === 1 ? "锁定关节" : name));
             }
@@ -172,7 +220,7 @@
         }
 
         document.addEventListener("pointerdown", event => {
-            if (!menu.contains(event.target)) menu.hidden = true;
+            if (!(event.target instanceof Node) || !menu.contains(event.target)) menu.hidden = true;
         }, true);
         canvas.addEventListener("contextmenu", event => {
             if (!rmfViser.connected(viewer)) return;
@@ -198,15 +246,16 @@
             placePopup(menu, event.clientX, event.clientY);
         }, true);
 
+        /** @type {string | null | undefined} */
         let labelsText;
+        /** @type {Record<string, string | undefined>} */
         let labels = {};
         state.internal.subscribe({ current: () => {
             const refs = viewer.mutable.current.nodeRefFromName;
             const config = readMenuConfig();
             // 原生组件会在切换主题时重建材质，因此在绘制前补齐置顶属性。
             for (const name of Object.keys(config?.frames ?? {})) {
-                const ref = refs[name];
-                const root = ref?.current ?? ref;
+                const root = rmfViser.sceneObject(refs[name]);
                 if (!root?.traverse) continue;
                 root.traverse(object => {
                     if (!object.isMesh || object === outline) return;
@@ -240,10 +289,10 @@
                 tooltip.hidden = true;
                 return;
             }
-            tooltip.textContent = labels[hit.name];
+            tooltip.textContent = labels[hit.name] ?? "";
             placePopup(tooltip, x + 14, y + 14);
         } }, 0, store);
         current.requestRender();
-    }
+    };
     rmfViser.whenViewer(viewer => rmfViser.whenScene(viewer, install));
 })();

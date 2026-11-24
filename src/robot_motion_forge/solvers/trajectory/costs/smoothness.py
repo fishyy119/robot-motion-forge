@@ -7,6 +7,7 @@ import pyceres
 from scipy.spatial.transform import Rotation
 
 from robot_motion_forge.motion.interpolation import hermite_basis
+from robot_motion_forge.robot.closure import ClosureError
 from robot_motion_forge.robot.definition import ControlMode
 from robot_motion_forge.robot.kinematics import ControlFrameKinematics
 from robot_motion_forge.utils.array_types import FloatArray
@@ -51,7 +52,8 @@ class SmoothnessCost(pyceres.CostFunction):
         self.layout, self.velocity_maps, self.frame = layout, velocity_maps, frame
         robot = layout.robot
         self.width = len(layout.sizes) + 1
-        self.set_parameter_block_sizes([*layout.sizes, robot.model.nv] * 2)
+        self.dofs = robot.independent_dofs
+        self.set_parameter_block_sizes([*layout.sizes, len(self.dofs)] * 2)
         self.qidx = robot.linear_qpos_indices
         self.vidx = robot.linear_qvel_indices
         self.track_position = frame is None or mode in ("position", "pose")
@@ -80,17 +82,21 @@ class SmoothnessCost(pyceres.CostFunction):
         self.weights: FloatArray = weights[:, :, None] * scales
 
     def _state(self, parameters: Parameters, mapping: KnotVelocityMap, *, jacobian: bool) -> _MotionState:
-        pose = self.layout.unpack(parameters[:-1])
+        if self.frame is None:
+            pose, lift = self.layout.unpack(parameters[:-1]), None
+        else:
+            pose, lift = self.layout.reconstruct(parameters[:-1], jacobian=True)
         velocity, pose_slope, block_slope = mapping.decode(pose, parameters[-1], jacobian=jacobian)
         if self.frame is not None:
             # 以端点的 FK 位姿与 J(q)v 构造任务空间近似，区间内无需逐点 FK。
             state = self.frame.state(pose, jacobian=True)
             assert state.jacobian is not None
-            spatial = state.jacobian[self.rows]
+            frame_jacobian = state.jacobian if lift is None else state.jacobian @ lift
+            spatial = frame_jacobian[self.rows]
             derivative = None
             if pose_slope is not None:
                 derivative = spatial * pose_slope
-                derivative += self.frame.velocity_pose_jacobian(pose, velocity, state.jacobian)[self.rows]
+                derivative += self.frame.velocity_pose_jacobian(pose, velocity, frame_jacobian)[self.rows]
             return _MotionState(
                 state.position if self.track_position else np.empty(0),
                 state.orientation if self.track_orientation else None,
@@ -118,8 +124,11 @@ class SmoothnessCost(pyceres.CostFunction):
 
     def Evaluate(self, parameters: Parameters, residuals: FloatArray, jacobians: Jacobians) -> bool:
         left, right = parameters[: self.width], parameters[self.width :]
-        a = self._state(left, self.velocity_maps[0], jacobian=jacobians is not None)
-        b = self._state(right, self.velocity_maps[1], jacobian=jacobians is not None)
+        try:
+            a = self._state(left, self.velocity_maps[0], jacobian=jacobians is not None)
+            b = self._state(right, self.velocity_maps[1], jacobian=jacobians is not None)
+        except ClosureError:
+            return False
         displacement, end_speed = b.position - a.position, b.velocity
         delta = None
         omega = b.velocity[-3:]
@@ -152,9 +161,9 @@ class SmoothnessCost(pyceres.CostFunction):
             jacobians,
             [
                 *self.layout.jacobian_blocks(left_pose.reshape(len(residuals), -1), left[:-1]),
-                (v0 * a.velocity_block).reshape(len(residuals), -1),
+                (v0 * a.velocity_block).reshape(len(residuals), -1)[:, self.dofs],
                 *self.layout.jacobian_blocks(right_pose.reshape(len(residuals), -1), right[:-1]),
-                (v1 * end_block).reshape(len(residuals), -1),
+                (v1 * end_block).reshape(len(residuals), -1)[:, self.dofs],
             ],
         )
         return True

@@ -71,9 +71,19 @@ class ControlFrameKinematics:
         step = 1e-5 / max(1.0, float(np.linalg.norm(velocity, ord=np.inf)))
         offset = step * velocity
         robot = self.robot
-        plus = self.state(robot.integrate(pose, offset), jacobian=True).jacobian
-        minus = self.state(robot.integrate(pose, -offset), jacobian=True).jacobian
+        plus_pose = robot.integrate(pose, offset)
+        minus_pose = robot.integrate(pose, -offset)
+        plus_lift, minus_lift = None, None
+        if robot.closure is not None:
+            # 导数探测可越过限位，实际节点仍须满足从动关节限位。
+            plus_pose, plus_lift = robot.closure.reconstruct(plus_pose, jacobian=True, limits=False)
+            minus_pose, minus_lift = robot.closure.reconstruct(minus_pose, jacobian=True, limits=False)
+        plus = self.state(plus_pose, jacobian=True).jacobian
+        minus = self.state(minus_pose, jacobian=True).jacobian
         assert plus is not None and minus is not None
+        if plus_lift is not None and minus_lift is not None:
+            plus = plus @ plus_lift
+            minus = minus @ minus_lift
         derivative = (plus - minus) / (2 * step)
         if robot.floating:
             derivative[:, 3:6] -= jacobian[:, 3:6] @ skew(velocity[3:6])

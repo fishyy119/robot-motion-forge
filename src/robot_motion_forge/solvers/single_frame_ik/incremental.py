@@ -83,8 +83,11 @@ class PoseIK:
     """同一次姿态求解的任务、硬锁定与 MuJoCo 运动学状态。"""
 
     def __init__(self, robot: Robot, qpos: FloatArray, *, constraints: EditConstraints) -> None:
+        self.robot = robot
         self.configuration = mink.Configuration(robot.model, qpos)
-        self._posture = mink.PostureTask(robot.model, cost=0.001)
+        posture_weights = np.zeros(robot.model.nv)
+        posture_weights[robot.independent_dofs] = 0.001
+        self._posture = mink.PostureTask(robot.model, cost=posture_weights)
         self._posture.set_target(qpos)
         constraints.validate_robot(robot)
         frozen = [int(robot.vadr[robot.joint_names.index(name)]) for name in constraints.locked_joints]
@@ -104,23 +107,39 @@ class PoseIK:
         )
 
     def increment(self, target: mink.FrameTask | None = None) -> FloatArray:
+        """求独立坐标增量，按 MuJoCo 的广义坐标顺序返回。"""
         # 虚拟时间步为 1，优化变量即本次切空间增量。
         self.configuration.check_limits(safety_break=False)
         tasks = [target, self._posture] if target is not None else [self._posture]
-        problem = mink.build_ik(self.configuration, tasks, dt=1.0, damping=1e-6, limits=self.limits)
+        damping = 1e-6
+        closure = self.robot.closure
+        problem = mink.build_ik(
+            self.configuration, tasks, dt=1.0, damping=damping if closure is None else 0.0, limits=self.limits
+        )
+        matrix, feedback = self.equalities()
+        chart = None
+        if closure is not None:
+            chart = self.robot.velocity_lift(self.configuration.q)[:, self.robot.independent_dofs]
+            matrix = matrix @ chart
         try:
-            space = ConstraintSpace.from_equalities(*self.equalities())
+            space = ConstraintSpace.from_equalities(matrix, feedback)
         except InconsistentConstraints as exc:
             raise mink.NoSolutionFound("daqp") from exc
         origin, basis = space.offset, space.basis
+        if chart is not None:
+            origin, basis = chart @ origin, chart @ basis
         hessian = np.asarray(problem.P, dtype=float)
         gradient = np.asarray(problem.q, dtype=float)
         inequalities = np.asarray(problem.G, dtype=float) if problem.G is not None else None
         bounds = np.asarray(problem.h, dtype=float) if problem.h is not None else None
         if basis.shape[1]:
             # 在硬约束的零空间中优化软目标，近相关的等式不再进入 DAQP 的活动集。
+            reduced_hessian = basis.T @ hessian @ basis
+            if chart is not None:
+                # 零空间基在独立坐标中正交，阻尼以独立坐标的增量为准。
+                reduced_hessian += damping * np.eye(basis.shape[1])
             reduced = qpsolvers.Problem(
-                basis.T @ hessian @ basis,
+                reduced_hessian,
                 basis.T @ (hessian @ origin + gradient),
                 inequalities @ basis if inequalities is not None else None,
                 bounds - inequalities @ origin if bounds is not None and inequalities is not None else None,
@@ -139,4 +158,6 @@ class PoseIK:
             raise mink.NoSolutionFound("daqp")
         # 将硬锁定的数值舍入误差归零，避免连续交互积累漂移。
         delta[self.frozen] = 0.0
+        if closure is not None:
+            delta[closure.passive] = 0.0
         return delta

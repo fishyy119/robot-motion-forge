@@ -7,10 +7,11 @@ import mink
 import mujoco as mj
 import numpy as np
 from mink.limits.limit import Constraint
-from numpy.typing import ArrayLike
+from numpy.typing import ArrayLike, NDArray
 from scipy.spatial.transform import Rotation
 
 from robot_motion_forge.motion.pose_constraints import EditConstraints, PoseTarget
+from robot_motion_forge.robot.closure import ClosureError
 from robot_motion_forge.robot.model import Robot
 from robot_motion_forge.utils.array_types import FloatArray
 from robot_motion_forge.utils.rotations import rotation_from_wxyz, rotation_to_wxyz
@@ -34,11 +35,12 @@ class DragResult:
 
 
 class _IncrementLimit(mink.Limit):
-    """包含 torso 自由度的单步分量边界；真实位移还需在积分后检查。"""
+    """独立坐标的单步分量边界；真实位移还需在积分后检查。"""
 
-    def __init__(self, scales: FloatArray) -> None:
-        self._matrix = np.vstack([np.eye(len(scales)), -np.eye(len(scales))])
-        self._bounds = np.r_[scales, scales]
+    def __init__(self, scales: FloatArray, dofs: NDArray[np.intp]) -> None:
+        axes = np.eye(len(scales))[dofs]
+        self._matrix = np.vstack([axes, -axes])
+        self._bounds = np.r_[scales[dofs], scales[dofs]]
 
     def compute_qp_inequalities(self, configuration: mink.Configuration, dt: float) -> Constraint:
         return Constraint(G=self._matrix, h=self._bounds)
@@ -95,8 +97,9 @@ def follow_target(
             position <= position_tolerance and orientation <= orientation_tolerance,
         )
 
+    dofs = robot.independent_dofs
     frozen = set(problem.frozen.tolist())
-    free_dofs = np.asarray([index for index in range(m.nv) if index not in frozen], dtype=int)
+    free_dofs = np.asarray([index for index in dofs if index not in frozen], dtype=int)
     initial_error = target_error(initial_position, initial_rotation)
     initial = make_result(qpos, False, initial_error)
     if not len(free_dofs) or initial.reached:
@@ -136,7 +139,7 @@ def follow_target(
     upper[robot.vadr] = np.minimum(upper[robot.vadr], robot.upper - qpos[robot.qadr])
 
     weights = np.r_[np.full(3, 1 / position_step), np.full(len(initial_error) - 3, 0.25 / rotation_step)]
-    increment_limit = _IncrementLimit(scales)
+    increment_limit = _IncrementLimit(scales, dofs)
     problem.limits.append(increment_limit)
     try:
         increment = problem.increment(task)
@@ -161,6 +164,10 @@ def follow_target(
                 continue
             candidate = robot.integrate(qpos, increment)
             candidate[robot.qadr] = np.clip(candidate[robot.qadr], robot.lower, robot.upper)
+            try:
+                candidate = robot.reconstruct(candidate)
+            except ClosureError:
+                continue
             robot.forward(candidate, candidate_data)
             if constraints.anchors and constraints.violated_anchor(robot, candidate_data) is not None:
                 # 沿约束流形恢复锚点，补偿积分产生的二阶误差；恢复后仍检查总增量。
@@ -175,6 +182,11 @@ def follow_target(
                         break
                     candidate = robot.integrate(projection.configuration.q, correction)
                     candidate[robot.qadr] = np.clip(candidate[robot.qadr], robot.lower, robot.upper)
+                    try:
+                        candidate = robot.reconstruct(candidate)
+                    except ClosureError:
+                        candidate = projection.configuration.q.copy()
+                        break
                     projection.configuration.update(candidate)
                     if constraints.violated_anchor(robot, projection.configuration.data) is None:
                         break
@@ -183,7 +195,7 @@ def follow_target(
             if constraints.violated_anchor(robot, candidate_data) is not None:
                 continue
             displacement = robot.difference(qpos, candidate)
-            if np.any(displacement < lower - 1e-9) or np.any(displacement > upper + 1e-9):
+            if np.any(displacement[dofs] < lower[dofs] - 1e-9) or np.any(displacement[dofs] > upper[dofs] + 1e-9):
                 continue
             if robot.floating and (
                 np.linalg.norm(displacement[:3]) > position_step * 1.000001
@@ -208,14 +220,9 @@ def follow_target(
 
     # 近奇异姿态下一阶增量可能为零；只对影响目标或锚点的自由度尝试受限探测。
     # 每个探测都必须降低实际误差并通过同样的限位与步长检查。
-    jacobian = (
-        np.asarray(task.cost[:, None] * task.compute_jacobian(problem.configuration))[:, free_dofs] * scales[free_dofs]
-    )
-    anchor_jacobian = (
-        problem.equalities()[0][:, free_dofs] * scales[free_dofs]
-        if constraints.anchors
-        else np.empty((0, len(free_dofs)))
-    )
+    lift = robot.velocity_lift(qpos)[:, free_dofs] * scales[free_dofs]
+    jacobian = np.asarray(task.cost[:, None] * task.compute_jacobian(problem.configuration)) @ lift
+    anchor_jacobian = problem.equalities()[0] @ lift if constraints.anchors else np.empty((0, len(free_dofs)))
     # 锚定时，腿部即使不直接影响躯干目标，也可能通过约束流形的弯曲产生可行进展。
     influential = np.linalg.norm(np.vstack((jacobian, anchor_jacobian)), axis=0) > 1e-7
     probe_dofs = free_dofs[influential]

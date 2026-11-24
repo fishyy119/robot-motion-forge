@@ -11,13 +11,14 @@ from typing import SupportsIndex, cast
 import json5
 import mujoco as mj
 import numpy as np
-from numpy.typing import ArrayLike
+from numpy.typing import ArrayLike, NDArray
 
 from robot_motion_forge.utils.array_types import FloatArray
 from robot_motion_forge.utils.paths import resolve_path
 from robot_motion_forge.utils.rotations import normalize_wxyz
 
 from . import GROUND_HEIGHT_M
+from .closure import PassiveClosure
 from .definition import ControlFrame, RobotDefinition
 from .kinematics import forward_kinematics
 
@@ -44,38 +45,31 @@ class Robot:
         self.model_path = resolve_path(config.robot.model, base_dir=self.repository_root)
         if not self.model_path.is_file():
             raise ValueError(f"找不到本地模型：{self.model_path}")
-        spec = mj.MjSpec.from_file(str(self.model_path))
-        _isolate_robot(spec)
-        for name, bounds in config.robot.joint_limit_overrides.items():
-            joint = cast(mj.MjsJoint | None, spec.joint(name))
-            if joint is None:
-                raise ValueError(f"关节限位包含未知关节：{name}")
-            if joint.type not in (mj.mjtJoint.mjJNT_HINGE, mj.mjtJoint.mjJNT_SLIDE):
-                raise ValueError(f"关节限位只支持 hinge / slide 关节：{name}")
-            # 配置始终使用 SI 单位；编译前按 MJCF 的角度约定写入，同步用于机器人与环境模型。
-            values = np.asarray(bounds, dtype=float)
-            joint.range = (
-                np.rad2deg(values) if joint.type == mj.mjtJoint.mjJNT_HINGE and spec.compiler.degree else values
-            )
-            joint.limited = mj.mjtLimited.mjLIMITED_TRUE
-        site_names = {name: f"rmf/frames/{name}" for name in config.frames}
-        # 控制坐标系使用独立默认值，避免继承原模型 site 的旋转、fromto 或材质设置。
-        site_defaults = mj.MjSpec()
-        for name, frame in config.frames.items():
-            body = cast(mj.MjsBody | None, spec.body(frame.body))
-            if body is None:
-                raise ValueError(f"找不到机器人连杆：{frame.body}")
-            # 位姿与雅可比共用真实控制坐标系的 site，足底偏移也参与位置任务。
-            body.add_site(
-                default=site_defaults.default,
-                name=site_names[name],
-                pos=frame.offset,
-                quat=(1, 0, 0, 0),
-                rgba=(0, 0, 0, 0),
-            )
+
+        spec, site_names = _prepare_robot_spec(self.model_path, config)
         self.model: mj.MjModel = spec.compile()
+        self.frame_site_ids = {name: self.model.site(site).id for name, site in site_names.items()}
+        self._initialize_body_layout()
+        self.home = self._read_home_pose()
+        self._initialize_joint_layout()
+        self.frames = dict(config.frames)
+        self.support_polygons = self._build_support_polygons()
+        for group in config.joint_groups.values():
+            if set(group) - set(self.joint_names):
+                raise ValueError("joint_groups 包含不可编辑或未知的关节")
+        self.home = self.validate_qpos(self.home)
+        self._spec = spec
+
+    @classmethod
+    def load(cls, path: str | Path) -> "Robot":
+        """读取本地机器人定义。实际模型、网格与本机配置不随源码分发。"""
+        config_path = resolve_path(path)
+        # JSON5 解析配置文本，Pydantic 随后校验字段与数值。
+        raw = json5.loads(config_path.read_text(encoding="utf-8"), allow_duplicate_keys=False)
+        return cls(RobotDefinition.model_validate(raw), config_path=config_path)
+
+    def _initialize_body_layout(self) -> None:
         m = self.model
-        self.frame_site_ids = {name: m.site(site).id for name, site in site_names.items()}
         roots = np.flatnonzero(m.body_parentid[1:] == 0) + 1
         if len(roots) != 1:
             raise ValueError("提取后的机器人模型必须恰好有一个顶层根连杆")
@@ -87,13 +81,39 @@ class Robot:
         self.floating = len(free) == 1
         if len(free) > 1 or (self.floating and (m.jnt_qposadr[free[0]] != 0 or m.jnt_bodyid[free[0]] != self.root_id)):
             raise ValueError("当前适配器要求根部为唯一自由关节，或使用 torso 固定的模型")
-        if np.any(m.jnt_type == mj.mjtJoint.mjJNT_BALL):
-            raise ValueError("当前适配器支持 torso 自由运动与 hinge/slide 关节；球关节需新增适配器")
-        if m.neq:
-            raise ValueError("当前适配器支持开链机器人；闭链 / equality 约束需要专用适配器")
         if m.opt.disableflags & mj.mjtDisableBit.mjDSBL_CONTACT:
             raise ValueError("模型关闭了接触，无法进行碰撞与接触验证")
-        self.joint_ids = [i for i in range(m.njnt) if m.jnt_type[i] != mj.mjtJoint.mjJNT_FREE]
+
+    def _read_home_pose(self) -> FloatArray:
+        m, config = self.model, self.config.home
+        pose = m.qpos0.copy()
+        if self.floating:
+            if config.position is not None:
+                pose[:3] = config.position
+            if config.quaternion is not None:
+                pose[3:7] = config.quaternion
+        for field, values, joint_type in (
+            ("joints_rad", config.joints_rad, mj.mjtJoint.mjJNT_HINGE),
+            ("joints_m", config.joints_m, mj.mjtJoint.mjJNT_SLIDE),
+        ):
+            for name, value in values.items():
+                joint = mj.mj_name2id(m, mj.mjtObj.mjOBJ_JOINT, name)
+                if joint < 0:
+                    raise ValueError(f"home.{field} 包含未知关节：{name}")
+                if m.jnt_type[joint] != joint_type:
+                    raise ValueError(f"home.{field} 的单位与关节类型不匹配：{name}")
+                pose[m.jnt_qposadr[joint]] = value
+        return pose
+
+    def _initialize_joint_layout(self) -> None:
+        m = self.model
+        has_equalities = bool(np.any(m.eq_active0)) and not (m.opt.disableflags & mj.mjtDisableBit.mjDSBL_EQUALITY)
+        self.closure = PassiveClosure(m, self.home) if has_equalities else None
+        passive = () if self.closure is None else self.closure.joint_ids
+        self.independent_dofs: NDArray[np.intp] = np.arange(m.nv) if self.closure is None else self.closure.independent
+        self.joint_ids = [i for i in range(m.njnt) if m.jnt_type[i] != mj.mjtJoint.mjJNT_FREE and i not in passive]
+        if any(m.jnt_type[i] == mj.mjtJoint.mjJNT_BALL for i in self.joint_ids):
+            raise ValueError("可编辑关节仅支持 hinge / slide；球关节可由闭合约束重建")
         self.joint_names: list[str] = [m.joint(i).name for i in self.joint_ids]
         if not all(self.joint_names):
             raise ValueError("可编辑关节必须有名称")
@@ -106,8 +126,9 @@ class Robot:
             [m.jnt_range[i, 0] if m.jnt_limited[i] else -np.inf for i in self.joint_ids]
         )
         self.upper: FloatArray = np.asarray([m.jnt_range[i, 1] if m.jnt_limited[i] else np.inf for i in self.joint_ids])
-        self.frames = dict(config.frames)
-        self.support_polygons: dict[str, SupportPolygon] = {}
+
+    def _build_support_polygons(self) -> dict[str, SupportPolygon]:
+        polygons: dict[str, SupportPolygon] = {}
         for name, frame in self.frames.items():
             self.body_id(frame.body)
             self.frame_reference_id(name, frame.trajectory_reference_body)
@@ -115,37 +136,8 @@ class Robot:
                 vertices = np.asarray(frame.support_polygon_cm, dtype=float) / 100.0
                 normal = np.asarray(support_normal)
                 vertices.flags.writeable = normal.flags.writeable = False
-                self.support_polygons[name] = SupportPolygon(self.frame_site_ids[name], vertices, normal)
-        for group in config.joint_groups.values():
-            if set(group) - set(self.joint_names):
-                raise ValueError("joint_groups 包含模型中不存在的关节")
-        self.home: FloatArray = m.qpos0.copy()
-        if self.floating:
-            if config.home.position is not None:
-                self.home[:3] = config.home.position
-            if config.home.quaternion is not None:
-                self.home[3:7] = config.home.quaternion
-        for field, values, joint_type in (
-            ("joints_rad", config.home.joints_rad, mj.mjtJoint.mjJNT_HINGE),
-            ("joints_m", config.home.joints_m, mj.mjtJoint.mjJNT_SLIDE),
-        ):
-            for name, value in values.items():
-                if name not in self.joint_names:
-                    raise ValueError(f"home.{field} 包含未知关节：{name}")
-                index = self.joint_names.index(name)
-                if m.jnt_type[self.joint_ids[index]] != joint_type:
-                    raise ValueError(f"home.{field} 的单位与关节类型不匹配：{name}")
-                self.home[self.qadr[index]] = value
-        self.home = self.validate_qpos(self.home)
-        self._spec = spec
-
-    @classmethod
-    def load(cls, path: str | Path) -> "Robot":
-        """读取本地机器人定义。实际模型、网格与本机配置不随源码分发。"""
-        config_path = resolve_path(path)
-        # JSON5 解析配置文本，Pydantic 随后校验字段与数值。
-        raw = json5.loads(config_path.read_text(encoding="utf-8"), allow_duplicate_keys=False)
-        return cls(RobotDefinition.model_validate(raw), config_path=config_path)
+                polygons[name] = SupportPolygon(self.frame_site_ids[name], vertices, normal)
+        return polygons
 
     def copy_spec(self) -> mj.MjSpec:
         """复制已应用关节限位和控制坐标系的 MuJoCo 规格，供组合场景使用。"""
@@ -193,6 +185,12 @@ class Robot:
         return bool(self.model.jnt_type[self.joint_ids[index]] == mj.mjtJoint.mjJNT_SLIDE)
 
     def validate_qpos(self, qpos: ArrayLike, *, limits: bool = True) -> FloatArray:
+        return self.validate_pose(qpos, limits=limits)[0]
+
+    def validate_pose(
+        self, qpos: ArrayLike, *, limits: bool = True, jacobian: bool = False
+    ) -> tuple[FloatArray, FloatArray | None]:
+        """校验并重建姿态，按需同时返回闭链速度映射。"""
         qpos = np.asarray(qpos, dtype=float).copy()
         if qpos.shape != (self.model.nq,):
             raise ValueError(f"qpos 维度与模型不一致：需要 {self.model.nq} 个分量，实际形状为 {qpos.shape}")
@@ -218,7 +216,20 @@ class Robot:
                 )
             # 容差内的舍入误差归入精确限位，锁定姿态也能直接作为求解器的常量。
             qpos[self.qadr] = np.clip(joints, self.lower, self.upper)
-        return qpos
+        if self.closure is None:
+            return qpos, None
+        return self.closure.reconstruct(qpos, limits=limits, jacobian=jacobian)
+
+    def reconstruct(self, qpos: FloatArray) -> FloatArray:
+        return qpos if self.closure is None else self.closure.reconstruct(qpos)[0]
+
+    def velocity_lift(self, qpos: FloatArray) -> FloatArray:
+        """将独立坐标的广义速度映射到完整状态；从动输入列为零。"""
+        if self.closure is None:
+            return np.eye(self.model.nv)
+        _, lift = self.closure.reconstruct(qpos, jacobian=True)
+        assert lift is not None
+        return lift
 
     def forward(self, qpos: ArrayLike, data: mj.MjData | None = None) -> mj.MjData:
         return forward_kinematics(self.model, qpos, data)
@@ -247,6 +258,38 @@ class Robot:
         out = np.asarray(reference, dtype=float).copy()
         mj.mj_integratePos(self.model, out, np.asarray(delta, dtype=float), 1.0)
         return out
+
+
+def _prepare_robot_spec(path: Path, config: RobotDefinition) -> tuple[mj.MjSpec, dict[str, str]]:
+    spec = mj.MjSpec.from_file(str(path))
+    _isolate_robot(spec)
+    for name, bounds in config.robot.joint_limit_overrides.items():
+        joint = cast(mj.MjsJoint | None, spec.joint(name))
+        if joint is None:
+            raise ValueError(f"关节限位包含未知关节：{name}")
+        if joint.type not in (mj.mjtJoint.mjJNT_HINGE, mj.mjtJoint.mjJNT_SLIDE):
+            raise ValueError(f"关节限位只支持 hinge / slide 关节：{name}")
+        # 配置始终使用 SI 单位；编译前按 MJCF 的角度约定写入，同步用于机器人与环境模型。
+        values = np.asarray(bounds, dtype=float)
+        joint.range = np.rad2deg(values) if joint.type == mj.mjtJoint.mjJNT_HINGE and spec.compiler.degree else values
+        joint.limited = mj.mjtLimited.mjLIMITED_TRUE
+
+    site_names = {name: f"rmf/frames/{name}" for name in config.frames}
+    # 控制坐标系使用独立默认值，避免继承原模型 site 的旋转、fromto 或材质设置。
+    site_defaults = mj.MjSpec()
+    for name, frame in config.frames.items():
+        body = cast(mj.MjsBody | None, spec.body(frame.body))
+        if body is None:
+            raise ValueError(f"找不到机器人连杆：{frame.body}")
+        # 位姿与雅可比共用真实控制坐标系的 site，足底偏移也参与位置任务。
+        body.add_site(
+            default=site_defaults.default,
+            name=site_names[name],
+            pos=frame.offset,
+            quat=(1, 0, 0, 0),
+            rgba=(0, 0, 0, 0),
+        )
+    return spec, site_names
 
 
 def _isolate_robot(spec: mj.MjSpec) -> None:

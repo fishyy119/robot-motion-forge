@@ -1,9 +1,14 @@
 /* 根据时间轴时刻更新侧栏图表的标线，缩放时沿用 uPlot 的坐标变换。 */
 (() => {
+    /** @type {WeakMap<ViserBrowser.Plot, HTMLDivElement>} */
     const lines = new WeakMap();
     let time = NaN;
     let pending = false;
 
+    /**
+     * @param {ViserBrowser.Plot} chart
+     * @param {HTMLDivElement} line
+     */
     function position(chart, line) {
         const { min, max } = chart.scales.x;
         line.hidden = !Number.isFinite(time) || min == null || max == null || time < min || time > max;
@@ -18,11 +23,12 @@
             if (chart.series[1]?.class !== "rmf-joint-curve") continue;
             let line = lines.get(chart);
             if (!line) {
-                line = document.createElement("div");
-                line.className = "rmf-curve-cursor";
-                chart.over.appendChild(line);
-                lines.set(chart, line);
-                (chart.hooks.draw ??= []).push(() => position(chart, line));
+                const cursor = document.createElement("div");
+                cursor.className = "rmf-curve-cursor";
+                chart.over.appendChild(cursor);
+                lines.set(chart, cursor);
+                (chart.hooks.draw ??= []).push(() => position(chart, cursor));
+                line = cursor;
             }
             position(chart, line);
         }

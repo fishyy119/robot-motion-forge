@@ -159,10 +159,17 @@ class Project(MotionModel):
         elif end.locked:
             seam = poses[-1]
         else:
-            # 两端均可调整时，循环分量从首尾姿态的中点开始。
-            seam = robot.integrate(poses[-1], 0.5 * robot.difference(poses[-1], poses[0]))
-        shared = slice(2, None) if translation_loop else slice(None)
-        poses[[0, -1], shared] = seam[shared]
+            # 两端均可调整时，循环分量从独立坐标的中点开始。
+            midpoint = 0.5 * robot.difference(poses[-1], poses[0])
+            if robot.closure is not None:
+                midpoint[robot.closure.passive] = 0.0
+            seam = robot.integrate(poses[-1], midpoint)
+        shared = robot.qadr
+        if robot.floating:
+            shared = np.r_[np.arange(2 if translation_loop else 0, 7), shared]
+        poses[np.ix_([0, len(poses) - 1], shared)] = seam[shared]
+        poses[0] = robot.reconstruct(poses[0])
+        poses[-1] = robot.reconstruct(poses[-1]) if translation_loop else poses[0]
         return ReferenceTrajectory(times, poses, terminal_condition="translation_loop" if translation_loop else "loop")
 
     def output_times(self) -> FloatArray:

@@ -1,26 +1,36 @@
 /* 将编排表操作转发给 Viser，并在表格刷新后保留键盘焦点。 */
 rmfViser.whenViewer(viewer => {
-    let focused;
     const controlSelector = "button[data-rmf-key-action]";
     const tableSelector = "[data-rmf-arrangement]";
+    /** @type {ReturnType<typeof tableAction>} */
+    let focused;
+
+    /** @param {Element | null} control */
+    function tableAction(control) {
+        const table = control?.closest(tableSelector);
+        if (!(control instanceof HTMLButtonElement) || !(table instanceof HTMLElement)) return;
+        const uuid = table.dataset.rmfArrangement;
+        const action = control.dataset.rmfKeyAction;
+        if (uuid !== undefined && action !== undefined) return { control, uuid, action };
+    }
 
     document.addEventListener("click", event => {
         const control = event.target instanceof Element ? event.target.closest(controlSelector) : null;
-        const table = control?.closest(tableSelector);
-        if (table) rmfViser.setGuiValue(viewer, table.dataset.rmfArrangement, control.dataset.rmfKeyAction);
+        const target = tableAction(control);
+        if (target) rmfViser.setGuiValue(viewer, target.uuid, target.action);
     });
 
     document.addEventListener("focusin", event => {
         const control = event.target;
-        const table = control instanceof Element && control.matches(controlSelector) ? control.closest(tableSelector) : null;
-        focused = table ? { control, uuid: table.dataset.rmfArrangement, action: control.dataset.rmfKeyAction } : null;
+        focused = control instanceof Element && control.matches(controlSelector) ? tableAction(control) : undefined;
     });
     new MutationObserver(() => {
         if (!focused || focused.control.isConnected) return;
         const { uuid, action } = focused;
-        focused = null;
+        focused = undefined;
         if (document.activeElement !== document.body) return;
         const table = document.querySelector(`[data-rmf-arrangement="${CSS.escape(uuid)}"]`);
-        table?.querySelector(`button[data-rmf-key-action="${CSS.escape(action)}"]`)?.focus({ preventScroll: true });
+        const button = table?.querySelector(`button[data-rmf-key-action="${CSS.escape(action)}"]`);
+        if (button instanceof HTMLButtonElement) button.focus({ preventScroll: true });
     }).observe(document.body, { childList: true, subtree: true });
 });

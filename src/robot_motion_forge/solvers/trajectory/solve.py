@@ -8,7 +8,8 @@ import numpy as np
 import pyceres
 
 from robot_motion_forge.motion.project import Project
-from robot_motion_forge.motion.trajectory import ReferenceTrajectory, SolvedTrajectory
+from robot_motion_forge.motion.trajectory import ReferenceTrajectory, SolvedTrajectory, validate_trajectory
+from robot_motion_forge.robot.closure import ClosureError
 from robot_motion_forge.robot.definition import ControlMode
 from robot_motion_forge.robot.kinematics import ControlFrameKinematics
 from robot_motion_forge.robot.model import Robot
@@ -18,7 +19,7 @@ from .costs.collision import CollisionCost, collision_model_for
 from .costs.reference import FrameReferenceCost, LinearReferenceCost, RotationReferenceCost, sample_frame_reference
 from .costs.smoothness import SmoothnessCost
 from .costs.support import SupportCost, initial_support_contacts
-from .parameters import KnotVelocityMap, PoseLayout
+from .parameters import Jacobians, KnotVelocityMap, Parameters, PoseLayout
 
 
 class SolveCancelled(RuntimeError):
@@ -64,13 +65,42 @@ class _PreparedTrajectory:
     problem: pyceres.Problem
 
     def result(self, converged: bool, message: str) -> SolvedTrajectory:
-        qpos = np.stack([self.layout.unpack(node.pose) for node in self.nodes])
-        qvel = np.stack(
-            [node.velocity_mapping.decode(pose, node.velocity)[0] for node, pose in zip(self.nodes, qpos, strict=True)]
-        )
+        robot = self.layout.robot
+        qpos = np.empty((len(self.nodes), robot.model.nq))
+        qvel = np.empty((len(self.nodes), robot.model.nv))
+        for index, node in enumerate(self.nodes):
+            pose, lift = self.layout.reconstruct(node.pose, jacobian=True)
+            velocity, _, _ = node.velocity_mapping.decode(pose, node.velocity)
+            qpos[index] = pose
+            qvel[index] = velocity if lift is None else lift @ velocity
         if not np.isfinite(qpos).all() or not np.isfinite(qvel).all():
             raise ValueError("求解器返回了非有限轨迹")
-        return SolvedTrajectory(self.times, qpos, qvel, converged, message)
+        trajectory = SolvedTrajectory(self.times, qpos, qvel, converged, message)
+        if robot.closure is not None:
+            validate_trajectory(robot, float(self.times[-1]), trajectory)
+        return trajectory
+
+
+class _ClosureFeasibilityCost(pyceres.CostFunction):
+    """没有几何代价时也拒绝无法闭合的候选姿态。"""
+
+    def __init__(self, layout: PoseLayout) -> None:
+        super().__init__()
+        self.layout = layout
+        self.set_parameter_block_sizes(layout.sizes)
+        self.set_num_residuals(1)
+
+    def Evaluate(self, parameters: Parameters, residuals: FloatArray, jacobians: Jacobians) -> bool:
+        try:
+            self.layout.reconstruct(parameters)
+        except ClosureError:
+            return False
+        residuals.fill(0.0)
+        if jacobians is not None:
+            for block in jacobians:
+                if block is not None:
+                    block.fill(0.0)
+        return True
 
 
 def _add_smoothness_costs(
@@ -107,14 +137,16 @@ def _add_smoothness_costs(
         )
 
 
-def _add_frame_tasks(prepared: _PreparedTrajectory, project: Project, keyframes: ReferenceTrajectory) -> None:
+def _add_frame_tasks(prepared: _PreparedTrajectory, project: Project, keyframes: ReferenceTrajectory) -> bool:
     settings, problem, times = project.settings, prepared.problem, prepared.times
     if max(settings.frame_reference, settings.frame_velocity, settings.frame_acceleration) <= 0:
-        return
+        return False
 
+    enabled = False
     for name, task in project.frame_tasks.items():
         if task.mode is None or task.weight <= 0:
             continue
+        enabled = True
         frame = ControlFrameKinematics(prepared.layout.robot, name, task.reference_body)
         if settings.frame_reference > 0:
             targets = sample_frame_reference(frame, keyframes, times, task.mode)
@@ -132,6 +164,7 @@ def _add_frame_tasks(prepared: _PreparedTrajectory, project: Project, keyframes:
             mode=task.mode,
             task_weight=task.weight,
         )
+    return enabled
 
 
 def _solve_node_times(project: Project) -> FloatArray:
@@ -166,17 +199,18 @@ def _build_nodes(
 ) -> _PreparedTrajectory:
     loop = project.settings.terminal_condition != "rest"
     translation_loop = keyframes.terminal_condition == "translation_loop"
-    # 逐关节插值只初始化优化变量，不作为整段轨迹的姿态跟随目标。
-    initial, velocities = keyframes.sample_state(robot, times)
+    # 独立坐标插值只初始化优化变量，不作为整段轨迹的姿态跟随目标。
+    initial, velocities = keyframes.sample_initial_state(robot, times)
     count = len(times)
     fixed = {key_indices[key.id] for key in project.keyframes if key.locked}
     stops = {key_indices[key.id] for key in project.keyframes if key.zero_velocity}
+    qpos_indices = np.r_[:7, robot.qadr] if robot.floating else robot.qadr
     for key in project.keyframes:
         if key.locked:
-            initial[key_indices[key.id]] = key.qpos
+            initial[key_indices[key.id], qpos_indices] = np.asarray(key.qpos)[qpos_indices]
     if loop:
-        shared = slice(2, None) if translation_loop else slice(None)
-        initial[[0, -1], shared] = keyframes.qpos[0, shared]
+        shared = qpos_indices[2:] if translation_loop else qpos_indices
+        initial[np.ix_([0, count - 1], shared)] = keyframes.qpos[0, shared]
         if translation_loop:
             # 两端从各自的水平曲线取速度，以两者的均值初始化共享速度。
             velocities[0, :2] = (velocities[0, :2] + velocities[-1, :2]) / 2
@@ -237,17 +271,20 @@ def _add_costs(
 
     _add_smoothness_costs(prepared, settings.velocity, settings.acceleration)
     free = [node for node in nodes if not node.locked]
+    has_geometric_costs = False
     if settings.foot_support and (
         settings.support_position > 0 or settings.support_orientation > 0 or settings.balance > 0
     ):
         data = None
         for node in free:
-            data = robot.forward(layout.unpack(node.pose), data)
+            data = robot.forward(layout.reconstruct(node.pose)[0], data)
             contacts = initial_support_contacts(robot, data)
             problem.add_residual_block(SupportCost(layout, contacts, settings, count), None, node.pose)
+        has_geometric_costs = bool(free)
     if free and (settings.self_collision > 0 or settings.ground_collision > 0):
         collision = collision_model_for(robot)
         if collision.collision_pairs.size:
+            has_geometric_costs = True
             weights = np.sqrt(
                 np.where(collision.ground_collision_mask, settings.ground_collision, settings.self_collision) / count
             )
@@ -257,7 +294,11 @@ def _add_costs(
                     None,
                     node.pose,
                 )
-    _add_frame_tasks(prepared, project, keyframes)
+    has_frame_costs = _add_frame_tasks(prepared, project, keyframes)
+    if robot.closure is not None and not (has_geometric_costs or has_frame_costs) and problem.num_residual_blocks():
+        feasibility = _ClosureFeasibilityCost(layout)
+        for node in free:
+            problem.add_residual_block(feasibility, None, node.pose)
 
 
 def _prepare(robot: Robot, project: Project) -> _PreparedTrajectory:
@@ -269,7 +310,7 @@ def _prepare(robot: Robot, project: Project) -> _PreparedTrajectory:
     key_indices = {key.id: int(np.argmin(abs(times - key.time))) for key in project.keyframes}
     prepared = _build_nodes(robot, project, keyframes, times, key_indices)
     # 全部节点的姿态和速度均已固定时，直接生成轨迹。
-    if robot.model.nv and not all(node.fixed for node in prepared.nodes):
+    if len(robot.independent_dofs) and not all(node.fixed for node in prepared.nodes):
         _add_costs(prepared, project, keyframes, key_indices)
     return prepared
 

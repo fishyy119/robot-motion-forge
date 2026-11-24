@@ -1,0 +1,13 @@
+{
+    "compilerOptions": {
+        "checkJs": true,
+        "strict": true,
+        "noEmit": true,
+        "target": "ES2022",
+        "moduleDetection": "legacy"
+    },
+    "include": [
+        "src/robot_motion_forge/ui/**/*.js",
+        "src/robot_motion_forge/ui/**/*.d.ts"
+    ]
+}

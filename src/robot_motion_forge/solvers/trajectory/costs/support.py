@@ -6,6 +6,7 @@ import pyceres
 
 from robot_motion_forge.motion.project import SolverSettings
 from robot_motion_forge.robot import GROUND_HEIGHT_M
+from robot_motion_forge.robot.closure import ClosureError
 from robot_motion_forge.robot.model import Robot
 from robot_motion_forge.robot.support import (
     CONTACT_POSITION_TOLERANCE_M,
@@ -50,7 +51,10 @@ class SupportCost(pyceres.CostFunction):
 
     def Evaluate(self, parameters: Parameters, residuals: FloatArray, jacobians: Jacobians) -> bool:
         robot = self.layout.robot
-        pose = self.layout.unpack(parameters)
+        try:
+            pose, lift = self.layout.reconstruct(parameters, jacobian=jacobians is not None)
+        except ClosureError:
+            return False
         robot.forward(pose, self.data)
         contacts = foot_states(robot, self.data, names=self.names)
         region = build_support_region(contacts) if self.balance_scale > 0 else None
@@ -100,5 +104,5 @@ class SupportCost(pyceres.CostFunction):
                     normal @ (com_jacobian - first) + offset @ normal_derivative @ (second - first)
                 )
         if derivative is not None:
-            write_jacobians(jacobians, self.layout.jacobian_blocks(derivative, parameters))
+            write_jacobians(jacobians, self.layout.jacobian_blocks(derivative, parameters, lift=lift))
         return True

@@ -11,6 +11,7 @@ from scipy.interpolate import PchipInterpolator
 from scipy.spatial.transform import Rotation
 
 from robot_motion_forge.motion.interpolation import RotationHermite
+from robot_motion_forge.robot.closure import ClosureError
 from robot_motion_forge.utils.array_types import FloatArray
 from robot_motion_forge.utils.rotations import inverse_right_jacobian, rotation_from_wxyz
 
@@ -106,7 +107,11 @@ class FrameReferenceCost(pyceres.CostFunction):
         self.set_parameter_block_sizes(self.layout.sizes)
 
     def Evaluate(self, parameters: Parameters, residuals: FloatArray, jacobians: Jacobians) -> bool:
-        state = self.frame.state(self.layout.unpack(parameters), jacobian=jacobians is not None)
+        try:
+            pose, lift = self.layout.reconstruct(parameters, jacobian=jacobians is not None)
+        except ClosureError:
+            return False
+        state = self.frame.state(pose, jacobian=jacobians is not None)
         derivative = np.zeros((self.size, self.frame.robot.model.nv)) if jacobians is not None else None
         row = 0
         if self.target_position is not None:
@@ -127,5 +132,5 @@ class FrameReferenceCost(pyceres.CostFunction):
                     @ state.jacobian[3:]
                 )
         if derivative is not None:
-            write_jacobians(jacobians, self.layout.jacobian_blocks(derivative, parameters))
+            write_jacobians(jacobians, self.layout.jacobian_blocks(derivative, parameters, lift=lift))
         return True

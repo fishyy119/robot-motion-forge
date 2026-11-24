@@ -8,7 +8,12 @@
 
 ## 定义任务机器人
 
-以 [机器人配置样例](configs/robots/robot.example.json) 为起点创建本机配置，编辑器从本地的 MuJoCo MJCF 加载一个开链机器人。场景中的其他内容会在编译前移除，MJCF 有多个顶层 `<body>` 时，编辑器按声明顺序保留第一个及其子树。
+以 [机器人配置样例](configs/robots/robot.example.json) 为起点创建本机配置，编辑器从本地的 MuJoCo MJCF 加载机器人。
+
+> [!NOTE]
+> 程序仅会保留第一个顶层 `<body>` 作为需要加载的机器人，忽略场景内的其他元素。
+>
+> 对于含闭链的机器人，程序会自动推断从动关节，使用独立坐标编辑和求解。由于闭链机构的多样性，相关的调试和验证覆盖较为有限。
 
 - `robot:` 机器人模型。
   - `name:` 编辑器中显示的机器人名称。
@@ -30,7 +35,7 @@
     - `fixed_mode:` 新会话中的默认固定分量。
     - `trajectory_mode:` 新工程中的默认轨迹跟踪分量。
     - `trajectory_reference_body:` 参考连杆，配合 `trajectory_mode` 使用。省略时使用世界坐标系。
-- `joint_groups:` 按模型中的关节名分组，用于姿态面板和关节曲线。
+- `joint_groups:` 按可编辑关节名分组，用于姿态面板和关节曲线。
 
 完整字段定义见 [机器人配置 Schema](configs/robots/robot-definition.schema.json)。
 
@@ -81,5 +86,7 @@ robot-motion-forge --robot <path-to-robot.json> --project <project-path>  # 指�
 以上约束可以通过将权重设为 0 关闭。
 
 ### PKL 导出
+
+`dof_pos` 按可编辑关节在 MJCF 中的顺序输出。从动连杆用闭合重建后的姿态计算 `local_body_pos`。
 
 「修正基座高度」默认关闭。开启后，使用与 GMR 相同的估计逻辑修正基座高度。

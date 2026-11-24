@@ -9,6 +9,7 @@ import mujoco as mj
 import numpy as np
 import pyceres
 
+from robot_motion_forge.robot.closure import ClosureError
 from robot_motion_forge.robot.kinematics import forward_kinematics
 from robot_motion_forge.robot.model import Robot
 from robot_motion_forge.utils.array_types import FloatArray
@@ -157,7 +158,10 @@ class CollisionCost(pyceres.CostFunction):
         self.set_parameter_block_sizes(self.layout.sizes)
 
     def Evaluate(self, parameters: Parameters, residuals: FloatArray, jacobians: Jacobians) -> bool:
-        pose = self.layout.unpack(parameters)
+        try:
+            pose, lift = self.layout.reconstruct(parameters, jacobian=jacobians is not None)
+        except ClosureError:
+            return False
         forward_kinematics(self.collision.model, pose, self.data)
         derivative = self.derivative if jacobians is not None else None
         errors = self.collision.collision_errors(self.data, self.margin_m, jacobian=derivative)
@@ -165,7 +169,9 @@ class CollisionCost(pyceres.CostFunction):
             self._aggregate_ground_contacts(errors, derivative)
         residuals[:] = errors * self.weights
         if derivative is not None:
-            write_jacobians(jacobians, self.layout.jacobian_blocks(derivative * self.weights[:, None], parameters))
+            write_jacobians(
+                jacobians, self.layout.jacobian_blocks(derivative * self.weights[:, None], parameters, lift=lift)
+            )
         return True
 
     def _aggregate_ground_contacts(self, errors: FloatArray, derivative: FloatArray | None) -> None:

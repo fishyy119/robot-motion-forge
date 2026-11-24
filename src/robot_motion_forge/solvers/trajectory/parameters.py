@@ -87,8 +87,17 @@ class PoseLayout:
             pose[:2], pose[2:3], pose[3:7] = parameters[-3:]
         return pose
 
-    def jacobian_blocks(self, derivative: FloatArray, parameters: Parameters) -> list[FloatArray]:
+    def reconstruct(self, parameters: Parameters, *, jacobian: bool = False) -> tuple[FloatArray, FloatArray | None]:
+        pose = self.unpack(parameters)
+        closure = self.robot.closure
+        return (pose, None) if closure is None else closure.reconstruct(pose, jacobian=jacobian)
+
+    def jacobian_blocks(
+        self, derivative: FloatArray, parameters: Parameters, *, lift: FloatArray | None = None
+    ) -> list[FloatArray]:
         robot = self.robot
+        if lift is not None:
+            derivative = derivative @ lift
         blocks: list[FloatArray] = []
         if robot.joint_names:
             blocks.append(derivative[:, robot.vadr])
@@ -109,7 +118,9 @@ class KnotVelocityMap:
     def __init__(self, robot: Robot, incoming: float | None, outgoing: float | None, *, stopped: bool) -> None:
         limited = np.isfinite(robot.lower)
         self.nv = robot.model.nv
+        self.dofs = robot.independent_dofs
         self.qidx, self.vidx = robot.qadr[limited], robot.vadr[limited]
+        self.slots = np.searchsorted(self.dofs, self.vidx)
         self.lower, self.upper = robot.lower[limited], robot.upper[limited]
         self.incoming = None if incoming is None else 3 / incoming
         self.outgoing = None if outgoing is None else 3 / outgoing
@@ -134,21 +145,22 @@ class KnotVelocityMap:
         )
 
     def add_block(self, problem: pyceres.Problem, pose: FloatArray, velocity: FloatArray) -> FloatArray:
-        if self.nv == 0:
-            return velocity.copy()
+        block = velocity[self.dofs]
+        size = len(block)
+        if not size:
+            return block
         if self.stopped:
-            block = np.zeros(self.nv)
-            problem.add_parameter_block(block, self.nv)
+            block.fill(0)
+            problem.add_parameter_block(block, size)
             problem.set_parameter_block_constant(block)
             return block
-        block = velocity.copy()
         lower, upper, _, _ = self._limits(pose)
         width = upper - lower
-        block[self.vidx] = np.divide(
+        block[self.slots] = np.divide(
             velocity[self.vidx] - lower, width, out=np.full_like(width, 0.5), where=width > 0
         ).clip(0, 1)
-        problem.add_parameter_block(block, self.nv)
-        for index in self.vidx:
+        problem.add_parameter_block(block, size)
+        for index in self.slots:
             problem.set_parameter_lower_bound(block, int(index), 0.0)
             problem.set_parameter_upper_bound(block, int(index), 1.0)
         return block
@@ -156,12 +168,13 @@ class KnotVelocityMap:
     def decode(
         self, pose: FloatArray, block: FloatArray, *, jacobian: bool = False
     ) -> tuple[FloatArray, FloatArray | None, FloatArray | None]:
+        velocity = np.zeros(self.nv)
+        velocity[self.dofs] = block
         if self.stopped:
             slope = np.zeros(self.nv) if jacobian else None
-            return block, slope, slope
+            return velocity, slope, slope
         lower, upper, d_lower, d_upper = self._limits(pose)
-        fraction = block[self.vidx]
-        velocity = block.copy()
+        fraction = block[self.slots]
         velocity[self.vidx] = (1 - fraction) * lower + fraction * upper
         if not jacobian:
             return velocity, None, None
